@@ -1,15 +1,22 @@
 # Interactive debug session on a GitHub runner — for developing without a
-# local Rust toolchain. Builds the web frontend + codeg-server/codeg-mcp,
-# then opens a tmate SSH session with the binary ready to run.
+# local Rust toolchain. Opens a tmate SSH session FIRST (fail fast if the
+# public relay refuses GitHub runner IPs), then builds the web frontend +
+# codeg-server/codeg-mcp, then parks the job for up to ~6h.
 #
 # Usage:
-#   gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref <branch>
-#   (SSH connection string appears in the "Debug session" step logs)
+#   gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref ci/debug-tmate
+#   The SSH connection string is published as the `tmate-connection` artifact
+#   (downloadable while the job runs) and also appears in the "Start tmate
+#   session" step logs.
 #
-# Inside the session, serve the app:
+# Connect from the client machine:
+#   ssh <session-string>
+# Daemon mode survives disconnects — just ssh again to reconnect.
+#
+# Inside the session, once the build finishes, serve the app:
 #   CODEG_STATIC_DIR=out CODEG_PORT=8787 ./src-tauri/target/release/codeg-server
-# Then from the client machine (port forward through the tmate session):
-#   ssh -L 8787:localhost:8787 <tmate-ssh-string>
+# Then forward the port through the SAME ssh connection (add on reconnect):
+#   ssh -L 8787:localhost:8787 <session-string>
 # and open http://localhost:8787 locally.
 
 name: Debug session (tmate)
@@ -26,6 +33,63 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+
+      # Manual tmate instead of mxschmitt/action-tmate: the action's
+      # connection string only appears in job logs, which GitHub serves AFTER
+      # the job ends (session over by then). Writing it to an artifact makes
+      # it downloadable while the session is live.
+      - name: Start tmate session
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tmate jq
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Same guarantee as the action's limit-access-to-actor: only keys
+          # registered on the triggering account may connect.
+          curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
+            >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          try_host() {
+            local host=$1
+            echo "--- relay $host: TCP check ---"
+            timeout 5 bash -c "</dev/tcp/$host/22" \
+              && echo "reachable" || echo "BLOCKED"
+            tmate -S /tmp/tmate.sock kill-session 2>/dev/null || true
+            rm -f /tmp/tmate.sock
+            printf 'set -g tmate-server-host "%s"\nset -g tmate-server-port 22\n' \
+              "$host" > /tmp/tmate.conf
+            tmate -f /tmp/tmate.conf -S /tmp/tmate.sock new-session -d
+            # The SSH string only appears once tmate has negotiated with the
+            # relay — poll rather than guess a sleep duration.
+            for i in $(seq 1 20); do
+              tmate -S /tmp/tmate.sock show-messages 2>&1 \
+                | grep -qE "ssh [A-Za-z0-9]+@" && return 0
+              sleep 2
+            done
+            return 1
+          }
+
+          OK=""
+          for host in nyc1.tmate.io sfo2.tmate.io fra1.tmate.io; do
+            if try_host "$host"; then OK="$host"; break; fi
+            echo "--- $host failed; last relay messages:"
+            tmate -S /tmp/tmate.sock show-messages 2>&1 | tail -5 || true
+          done
+
+          tmate -S /tmp/tmate.sock show-messages 2>&1 | tee /tmp/tmate-messages.txt
+          grep -qE "ssh [A-Za-z0-9]+@" /tmp/tmate-messages.txt || {
+            echo "FATAL: no public relay accepted a session from this runner"
+            exit 1
+          }
+          echo "Session relay: $OK"
+
+      - name: Publish connection info
+        uses: actions/upload-artifact@v4
+        with:
+          name: tmate-connection
+          path: /tmp/tmate-messages.txt
+          retention-days: 1
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -60,43 +124,6 @@ jobs:
         run: |
           cargo build --release --bin codeg-server --no-default-features
           cargo build --release --bin codeg-mcp --no-default-features
-
-      # Manual tmate instead of mxschmitt/action-tmate: the action's connection
-      # string only appears in job logs, which GitHub serves AFTER the job ends
-      # (session over by then). Writing it to an artifact makes it downloadable
-      # while the session is live. Daemon mode (`new-session -d`) also survives
-      # SSH disconnects — the action does not.
-      - name: Start tmate session
-        env:
-          ACTOR: ${{ github.actor }}
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq tmate
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Same guarantee as the action's limit-access-to-actor: only keys
-          # registered on the triggering account may connect.
-          curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
-            >> ~/.ssh/authorized_keys
-          chmod 600 ~/.ssh/authorized_keys
-          tmate -S /tmp/tmate.sock new-session -d
-          # The SSH string only appears once tmate has negotiated with the
-          # tmate.io relay — poll rather than guess a sleep duration.
-          for i in $(seq 1 30); do
-            tmate -S /tmp/tmate.sock show-messages | grep -qE "ssh [A-Za-z0-9]+@" \
-              && break
-            sleep 2
-          done
-          tmate -S /tmp/tmate.sock show-messages | tee /tmp/tmate-messages.txt
-          grep -qE "ssh [A-Za-z0-9]+@" /tmp/tmate-messages.txt || {
-            echo "FATAL: no SSH session string after 60s"
-            exit 1
-          }
-
-      - name: Publish connection info
-        uses: actions/upload-artifact@v4
-        with:
-          name: tmate-connection
-          path: /tmp/tmate-messages.txt
-          retention-days: 1
 
       # Holds the job open; the tmate daemon keeps serving on reconnect.
       - name: Keep session alive
