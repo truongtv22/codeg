@@ -114,11 +114,14 @@ jobs:
           pnpm install --frozen-lockfile
           pnpm build
 
-      - name: Build server + codeg-mcp
+      - name: Build server + companions
         working-directory: src-tauri
+        # Feature flags track upstream release.yml — they drifted when
+        # upstream split the bins behind `server-bin`/`mcp-bin` features.
         run: |
-          cargo build --release --bin codeg-server --no-default-features
-          cargo build --release --bin codeg-mcp --no-default-features
+          cargo build --release --bin codeg-server --no-default-features --features server-bin
+          cargo build --release --bin codeg-mcp --no-default-features --features mcp-bin
+          cargo build --release --bin codeg-computer-helper --no-default-features --features computer-helper
 
       # Serve the app immediately — the client only needs the SSH tunnel,
       # no manual server start inside the session.
