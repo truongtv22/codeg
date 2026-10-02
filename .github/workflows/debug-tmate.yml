@@ -30,8 +30,8 @@ env:
   HUSKY: 0
   # Access token the web UI asks for. Default is fine for throwaway debug
   # sessions: the real gate is SSH-key auth on the tunnel, and the port
-  # rotates per session. Override per-repo with the CODEG_TOKEN variable.
-  CODEG_TOKEN: ${{ vars.CODEG_TOKEN || 'codeg-debug-8787' }}
+  # rotates per session. Set the CODEG_TOKEN secret to pin your own.
+  CODEG_TOKEN: ${{ secrets.CODEG_TOKEN || 'codeg-debug-8787' }}
 
 jobs:
   debug:
@@ -134,6 +134,35 @@ jobs:
           sleep 4
           curl -s -o /dev/null -w "server http: %{http_code}\n" --max-time 5 \
             http://localhost:8787
+
+      # Telegram ping so the session can be picked up even when the local
+      # keeper/Mac is asleep. No-ops when the secrets are not configured.
+      - name: Notify Telegram (session ready)
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "telegram not configured; skip"; exit 0; }
+          PORT=$(grep -oE "ssh -p [0-9]+" /tmp/connection.txt | grep -oE "[0-9]+" | head -1)
+          TEXT="✅ ${GITHUB_REPOSITORY} — debug session ready
+          ssh -p ${PORT} runner@bore.pub
+          App: http://localhost:8787 (tunnel từ máy bạn)
+          Token: giá trị secret CODEG_TOKEN"
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="$CHAT" --data-urlencode "text=$TEXT" > /dev/null
+          echo "telegram notified"
+
+      - name: Notify Telegram (failure)
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || exit 0
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="$CHAT" \
+            --data-urlencode "text=❌ ${GITHUB_REPOSITORY} — debug session FAILED (run ${GITHUB_RUN_ID})" \
+            > /dev/null
 
       # Holds the job open; sshd keeps serving on reconnect.
       - name: Keep session alive
