@@ -168,3 +168,77 @@ jobs:
       - name: Keep session alive
         timeout-minutes: 355
         run: sleep 21600
+
+  # Parallel job: a desktop bundle the client Mac can install and use as the
+  # daily driver (no local Rust toolchain needed). Built from the SAME commit
+  # as the runner's server, so client and server never drift.
+  build-desktop:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      # Native build: the runner host triple IS aarch64-apple-darwin, so the
+      # host-fallback sidecar staging in beforeBuildCommand is correct here.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: desktop-darwin
+          cache-on-failure: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # Updater artifacts are off: they need the release signing key that a
+      # debug build does not have. Without an Apple Developer identity Tauri
+      # ad-hoc signs — the client Mac needs a one-time Gatekeeper bypass
+      # (`xattr -cr /Applications/Codeg.app` or right-click > Open).
+      - name: Build desktop bundle
+        run: >
+          pnpm tauri build --target aarch64-apple-darwin
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Package
+        run: |
+          APP=$(find src-tauri/target/aarch64-apple-darwin/release/bundle/macos \
+            -name "*.app" | head -1)
+          [ -n "$APP" ] || { echo "FATAL: .app bundle not found"; exit 1; }
+          ditto -c -k --keepParent "$APP" codeg-desktop-darwin-arm64.zip
+          ls -la codeg-desktop-darwin-arm64.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-desktop-darwin-arm64
+          path: codeg-desktop-darwin-arm64.zip
+          retention-days: 3
+
+      - name: Notify Telegram (desktop ready)
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "telegram not configured; skip"; exit 0; }
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="$CHAT" \
+            --data-urlencode "text=📦 ${GITHUB_REPOSITORY} — desktop app macOS arm64 đã build xong
+          Tải artifact 'codeg-desktop-darwin-arm64':
+          ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            > /dev/null
+          echo "telegram notified"
