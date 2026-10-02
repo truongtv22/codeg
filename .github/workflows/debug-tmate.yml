@@ -14,11 +14,11 @@
 # Only SSH keys registered on the triggering GitHub account may connect.
 # sshd survives disconnects — reconnect any time.
 #
-# Inside the session, once the build finishes, serve the app:
-#   CODEG_STATIC_DIR=out CODEG_PORT=8787 ./src-tauri/target/release/codeg-server
-# Then forward the port through the SAME ssh connection:
+# After the build, codeg-server auto-starts (pinned CODEG_TOKEN, see env
+# below). From the client machine, forward the port through the SSH
+# connection:
 #   ssh -L 8787:localhost:8787 -p <port> runner@bore.pub
-# and open http://localhost:8787 locally.
+# then open http://localhost:8787 and enter the access token.
 
 name: Debug session (SSH via bore)
 
@@ -28,6 +28,10 @@ on:
 env:
   RUST_BACKTRACE: short
   HUSKY: 0
+  # Access token the web UI asks for. Default is fine for throwaway debug
+  # sessions: the real gate is SSH-key auth on the tunnel, and the port
+  # rotates per session. Override per-repo with the CODEG_TOKEN variable.
+  CODEG_TOKEN: ${{ vars.CODEG_TOKEN || 'codeg-debug-8787' }}
 
 jobs:
   debug:
@@ -115,6 +119,18 @@ jobs:
         run: |
           cargo build --release --bin codeg-server --no-default-features
           cargo build --release --bin codeg-mcp --no-default-features
+
+      # Serve the app immediately — the client only needs the SSH tunnel,
+      # no manual server start inside the session.
+      - name: Start codeg-server
+        run: |
+          CODEG_STATIC_DIR=out CODEG_PORT=8787 \
+            nohup ./src-tauri/target/release/codeg-server </dev/null \
+            > /tmp/codeg-server.log 2>&1 &
+          disown
+          sleep 4
+          curl -s -o /dev/null -w "server http: %{http_code}\n" --max-time 5 \
+            http://localhost:8787
 
       # Holds the job open; sshd keeps serving on reconnect.
       - name: Keep session alive
