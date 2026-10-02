@@ -1,0 +1,67 @@
+# Interactive debug session on a GitHub runner — for developing without a
+# local Rust toolchain. Builds the web frontend + codeg-server/codeg-mcp,
+# then opens a tmate SSH session with the binary ready to run.
+#
+# Usage:
+#   gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref <branch>
+#   (SSH connection string appears in the "Debug session" step logs)
+#
+# Inside the session, serve the app:
+#   CODEG_STATIC_DIR=out CODEG_PORT=8787 ./src-tauri/target/release/codeg-server
+# Then from the client machine (port forward through the tmate session):
+#   ssh -L 8787:localhost:8787 <tmate-ssh-string>
+# and open http://localhost:8787 locally.
+
+name: Debug session (tmate)
+
+on:
+  workflow_dispatch:
+
+env:
+  RUST_BACKTRACE: short
+  HUSKY: 0
+
+jobs:
+  debug:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: debug-tmate
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Build frontend
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Build server + codeg-mcp
+        working-directory: src-tauri
+        run: |
+          cargo build --release --bin codeg-server --no-default-features
+          cargo build --release --bin codeg-mcp --no-default-features
+
+      # Only the account that triggered the run may connect (matched by
+      # GitHub SSH keys) — never open the session to anyone with the link.
+      - name: Debug session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          sudo: false
