@@ -30,11 +30,14 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Debug sessions usually end by disconnect (job marked failed), so
+      # save the build cache regardless — next session skips the cold build.
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
           shared-key: debug-tmate
+          cache-on-failure: true
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -64,4 +67,3 @@ jobs:
         uses: mxschmitt/action-tmate@v3
         with:
           limit-access-to-actor: true
-          sudo: false
