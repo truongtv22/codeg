@@ -61,9 +61,34 @@ jobs:
           cargo build --release --bin codeg-server --no-default-features
           cargo build --release --bin codeg-mcp --no-default-features
 
-      # Only the account that triggered the run may connect (matched by
-      # GitHub SSH keys) — never open the session to anyone with the link.
-      - name: Debug session
-        uses: mxschmitt/action-tmate@v3
+      # Manual tmate instead of mxschmitt/action-tmate: the action's connection
+      # string only appears in job logs, which GitHub serves AFTER the job ends
+      # (session over by then). Writing it to an artifact makes it downloadable
+      # while the session is live. Daemon mode (`new-session -d`) also survives
+      # SSH disconnects — the action does not.
+      - name: Start tmate session
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq tmate
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Same guarantee as the action's limit-access-to-actor: only keys
+          # registered on the triggering account may connect.
+          curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
+            >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+          tmate -S /tmp/tmate.sock new-session -d
+          sleep 3
+          tmate -S /tmp/tmate.sock show-messages | tee /tmp/tmate-messages.txt
+
+      - name: Publish connection info
+        uses: actions/upload-artifact@v4
         with:
-          limit-access-to-actor: true
+          name: tmate-connection
+          path: /tmp/tmate-messages.txt
+          retention-days: 1
+
+      # Holds the job open; the tmate daemon keeps serving on reconnect.
+      - name: Keep session alive
+        timeout-minutes: 355
+        run: sleep 21600
