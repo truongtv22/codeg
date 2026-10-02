@@ -1,25 +1,26 @@
 # Interactive debug session on a GitHub runner — for developing without a
-# local Rust toolchain. Opens a tmate SSH session FIRST (fail fast if the
-# public relay refuses GitHub runner IPs), then builds the web frontend +
+# local Rust toolchain. Opens an SSH tunnel FIRST (fail fast in ~2 min if the
+# public relay refuses the runner), then builds the web frontend +
 # codeg-server/codeg-mcp, then parks the job for up to ~6h.
+#
+# The public tmate.io relay is dead (nyc1.tmate.io no longer resolves
+# anywhere), so the runner exposes its own sshd through bore.pub instead.
 #
 # Usage:
 #   gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref ci/debug-tmate
-#   The SSH connection string is published as the `tmate-connection` artifact
-#   (downloadable while the job runs) and also appears in the "Start tmate
-#   session" step logs.
+#   Connection commands are published as the `tmate-connection` artifact
+#   (downloadable while the job runs) and also printed in the step logs.
 #
-# Connect from the client machine:
-#   ssh <session-string>
-# Daemon mode survives disconnects — just ssh again to reconnect.
+# Only SSH keys registered on the triggering GitHub account may connect.
+# sshd survives disconnects — reconnect any time.
 #
 # Inside the session, once the build finishes, serve the app:
 #   CODEG_STATIC_DIR=out CODEG_PORT=8787 ./src-tauri/target/release/codeg-server
-# Then forward the port through the SAME ssh connection (add on reconnect):
-#   ssh -L 8787:localhost:8787 <session-string>
+# Then forward the port through the SAME ssh connection:
+#   ssh -L 8787:localhost:8787 -p <port> runner@bore.pub
 # and open http://localhost:8787 locally.
 
-name: Debug session (tmate)
+name: Debug session (SSH via bore)
 
 on:
   workflow_dispatch:
@@ -34,61 +35,51 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Manual tmate instead of mxschmitt/action-tmate: the action's
-      # connection string only appears in job logs, which GitHub serves AFTER
-      # the job ends (session over by then). Writing it to an artifact makes
-      # it downloadable while the session is live.
-      - name: Start tmate session
+      - name: Start SSH tunnel
         env:
           ACTOR: ${{ github.actor }}
         run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq tmate jq
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server jq
+          sudo ssh-keygen -A
+          sudo service ssh start || sudo /usr/sbin/sshd
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Same guarantee as the action's limit-access-to-actor: only keys
-          # registered on the triggering account may connect.
+          # Only keys registered on the triggering GitHub account may connect.
           curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
             >> ~/.ssh/authorized_keys
           chmod 600 ~/.ssh/authorized_keys
 
-          try_host() {
-            local host=$1
-            echo "--- relay $host: TCP check ---"
-            timeout 5 bash -c "</dev/tcp/$host/22" \
-              && echo "reachable" || echo "BLOCKED"
-            tmate -S /tmp/tmate.sock kill-session 2>/dev/null || true
-            rm -f /tmp/tmate.sock
-            printf 'set -g tmate-server-host "%s"\nset -g tmate-server-port 22\n' \
-              "$host" > /tmp/tmate.conf
-            tmate -f /tmp/tmate.conf -S /tmp/tmate.sock new-session -d
-            # The SSH string only appears once tmate has negotiated with the
-            # relay — poll rather than guess a sleep duration.
-            for i in $(seq 1 20); do
-              tmate -S /tmp/tmate.sock show-messages 2>&1 \
-                | grep -qE "ssh [A-Za-z0-9]+@" && return 0
-              sleep 2
-            done
-            return 1
-          }
+          BORE_VER=0.5.0
+          curl -sL "https://github.com/ekzhang/bore/releases/download/v${BORE_VER}/bore-v${BORE_VER}-x86_64-unknown-linux-musl.tar.gz" \
+            | sudo tar xz -C /usr/local/bin bore
 
-          OK=""
-          for host in nyc1.tmate.io sfo2.tmate.io fra1.tmate.io; do
-            if try_host "$host"; then OK="$host"; break; fi
-            echo "--- $host failed; last relay messages:"
-            tmate -S /tmp/tmate.sock show-messages 2>&1 | tail -5 || true
+          nohup bore local 22 --to bore.pub > /tmp/bore.log 2>&1 &
+          PORT=""
+          # Parse the public port bore assigned (format varies by version:
+          # `remote_port=NNNNN` or `bore.pub:NNNNN`).
+          for i in $(seq 1 20); do
+            PORT=$(grep -oE "remote_port=[0-9]+|bore\.pub:[0-9]+" /tmp/bore.log \
+              | grep -oE "[0-9]+$" | head -1)
+            [ -n "$PORT" ] && break
+            sleep 2
           done
-
-          tmate -S /tmp/tmate.sock show-messages 2>&1 | tee /tmp/tmate-messages.txt
-          grep -qE "ssh [A-Za-z0-9]+@" /tmp/tmate-messages.txt || {
-            echo "FATAL: no public relay accepted a session from this runner"
+          if [ -z "$PORT" ]; then
+            echo "FATAL: bore tunnel not established"
+            cat /tmp/bore.log
             exit 1
-          }
-          echo "Session relay: $OK"
+          fi
+
+          cat > /tmp/connection.txt <<EOF
+          Connect:      ssh -p $PORT runner@bore.pub
+          Port-forward: ssh -L 8787:localhost:8787 -p $PORT runner@bore.pub
+          EOF
+          cat /tmp/connection.txt
 
       - name: Publish connection info
         uses: actions/upload-artifact@v4
         with:
           name: tmate-connection
-          path: /tmp/tmate-messages.txt
+          path: /tmp/connection.txt
           retention-days: 1
 
       - name: Install Rust stable
@@ -125,7 +116,7 @@ jobs:
           cargo build --release --bin codeg-server --no-default-features
           cargo build --release --bin codeg-mcp --no-default-features
 
-      # Holds the job open; the tmate daemon keeps serving on reconnect.
+      # Holds the job open; sshd keeps serving on reconnect.
       - name: Keep session alive
         timeout-minutes: 355
         run: sleep 21600
