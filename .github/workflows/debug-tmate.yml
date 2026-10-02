@@ -78,8 +78,18 @@ jobs:
             >> ~/.ssh/authorized_keys
           chmod 600 ~/.ssh/authorized_keys
           tmate -S /tmp/tmate.sock new-session -d
-          sleep 3
+          # The SSH string only appears once tmate has negotiated with the
+          # tmate.io relay — poll rather than guess a sleep duration.
+          for i in $(seq 1 30); do
+            tmate -S /tmp/tmate.sock show-messages | grep -qE "ssh [A-Za-z0-9]+@" \
+              && break
+            sleep 2
+          done
           tmate -S /tmp/tmate.sock show-messages | tee /tmp/tmate-messages.txt
+          grep -qE "ssh [A-Za-z0-9]+@" /tmp/tmate-messages.txt || {
+            echo "FATAL: no SSH session string after 60s"
+            exit 1
+          }
 
       - name: Publish connection info
         uses: actions/upload-artifact@v4
