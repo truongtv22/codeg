@@ -187,6 +187,28 @@ pub fn codeg_acp_transcripts_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(CODEG_DIR_NAME).join(ACP_TRANSCRIPTS_DIR_NAME))
 }
 
+/// JSON cache of the delegation companion's last-known per-agent model lists
+/// (`acp::delegation::agent_models`). Written whenever an agent advertises
+/// its session config options, read at app start so the `delegate_to_agent`
+/// schema enrichment survives restarts.
+///
+/// Resolution mirrors [`codeg_acp_transcripts_root`]:
+/// 1. `$CODEG_HOME/agent-models.json`
+/// 2. `$CODEG_DATA_DIR/agent-models.json` (server-mode data directory)
+/// 3. `~/.codeg/agent-models.json` (desktop default)
+pub fn codeg_delegation_models_file() -> PathBuf {
+    const FILE_NAME: &str = "agent-models.json";
+    if let Some(custom) = std::env::var_os("CODEG_HOME").filter(|s| !s.is_empty()) {
+        return PathBuf::from(custom).join(FILE_NAME);
+    }
+    if let Some(data) = std::env::var_os("CODEG_DATA_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(data).join(FILE_NAME);
+    }
+    dirs::home_dir()
+        .map(|h| h.join(CODEG_DIR_NAME).join(FILE_NAME))
+        .unwrap_or_else(|| PathBuf::from(CODEG_DIR_NAME).join(FILE_NAME))
+}
+
 /// Single source of truth for "where does the database live, and where
 /// do `paths::*` resolve their roots against."
 ///

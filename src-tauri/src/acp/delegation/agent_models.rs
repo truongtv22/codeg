@@ -15,10 +15,14 @@
 //! travels to codeg-mcp as the `--agent-models` argv blob and is folded
 //! into the tool description at `tools/list`.
 //!
-//! ponytail: in-memory only — a fresh app start starts empty and refills
-//! as agents run. Persist to `app_metadata` if cold-start coverage matters.
+//! The map is persisted to `paths::codeg_delegation_models_file()` so the
+//! enrichment survives restarts — without it, the first delegation after an
+//! app start runs against an empty list and the parent LLM has to guess ids.
+//! ponytail: the cached list is only refreshed when a session of that agent
+//! establishes; an agent-side model rename stays stale until then.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use tokio::sync::Mutex;
@@ -34,6 +38,12 @@ pub struct ModelChoice {
     pub name: String,
 }
 
+// Tests start from a deterministic empty map — disk load/save only runs in
+// the real app (the round-trip helpers are exercised directly in tests).
+#[cfg(not(test))]
+static MODEL_OPTIONS: LazyLock<Mutex<BTreeMap<AgentType, Vec<ModelChoice>>>> =
+    LazyLock::new(|| Mutex::new(load_from_disk_at(&crate::paths::codeg_delegation_models_file())));
+#[cfg(test)]
 static MODEL_OPTIONS: LazyLock<Mutex<BTreeMap<AgentType, Vec<ModelChoice>>>> =
     LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
@@ -74,7 +84,40 @@ pub async fn record(agent_type: AgentType, choices: Vec<ModelChoice>) {
     if choices.is_empty() {
         return;
     }
-    MODEL_OPTIONS.lock().await.insert(agent_type, choices);
+    let mut map = MODEL_OPTIONS.lock().await;
+    map.insert(agent_type, choices);
+    #[cfg(not(test))]
+    write_to_disk_at(&crate::paths::codeg_delegation_models_file(), &map);
+}
+
+/// Read the persisted model cache. Malformed or missing file → empty map:
+/// a broken cache must never block the companion from launching.
+fn load_from_disk_at(path: &Path) -> BTreeMap<AgentType, Vec<ModelChoice>> {
+    let Ok(raw) = std::fs::read(path) else {
+        return BTreeMap::new();
+    };
+    match serde_json::from_slice(&raw) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!("ignoring unreadable agent-models cache {}: {e}", path.display());
+            BTreeMap::new()
+        }
+    }
+}
+
+/// Persist the map. Best-effort — a failed write only costs cold-start
+/// enrichment, never correctness.
+fn write_to_disk_at(path: &Path, map: &BTreeMap<AgentType, Vec<ModelChoice>>) {
+    let write = || -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(map)?)?;
+        Ok(())
+    };
+    if let Err(e) = write() {
+        tracing::warn!("could not persist agent-models cache {}: {e}", path.display());
+    }
 }
 
 /// Record from a session's serialized config options, resolving the agent
@@ -165,5 +208,26 @@ mod tests {
         let choices = extract_choices(&[option]);
         let values: Vec<&str> = choices.iter().map(|c| c.value.as_str()).collect();
         assert_eq!(values, ["visible-1", "grouped-1"]);
+    }
+
+    #[test]
+    fn disk_round_trip_preserves_entries_and_recovers_from_garbage() {
+        let dir = std::env::temp_dir().join(format!("codeg-agent-models-{}", std::process::id()));
+        let file = dir.join("agent-models.json");
+        let mut map = BTreeMap::new();
+        map.insert(
+            AgentType::Antigravity,
+            vec![ModelChoice {
+                value: "gemini-3.7-flash-high".into(),
+                name: "Gemini 3.7 Flash (High)".into(),
+            }],
+        );
+        write_to_disk_at(&file, &map);
+        assert_eq!(load_from_disk_at(&file), map);
+
+        // A malformed cache degrades to empty, never panics or blocks.
+        std::fs::write(&file, b"{not json").unwrap();
+        assert!(load_from_disk_at(&file).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
