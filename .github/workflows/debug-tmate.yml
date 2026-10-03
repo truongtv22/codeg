@@ -165,9 +165,90 @@ jobs:
             > /dev/null
 
       # Holds the job open; sshd keeps serving on reconnect.
+      # 290 min (not 355) so the approval gate below still fits inside the
+      # 6h job cap even after a cold ~35 min build.
       - name: Keep session alive
-        timeout-minutes: 355
-        run: sleep 21600
+        timeout-minutes: 300
+        run: sleep 17400
+
+      # Telegram approval gate: session stays usable while waiting (the VM
+      # is alive until this job ends). 20 min to answer, then stop the chain.
+      - name: Ask Telegram approval to respawn
+        id: gate
+        if: '!cancelled()'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.parse, urllib.request
+
+          TOKEN, CHAT = os.environ["TOKEN"], os.environ["CHAT"]
+          WINDOW = 20 * 60
+
+          def call(method, **p):
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{TOKEN}/{method}",
+                  data=urllib.parse.urlencode(p).encode())
+              with urllib.request.urlopen(req, timeout=35) as r:
+                  return json.load(r)
+
+          def edit(mid, text):
+              try:
+                  call("editMessageText", chat_id=CHAT, message_id=mid, text=text)
+              except Exception:
+                  pass
+
+          def emit(ok):
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write(f"approved={'true' if ok else 'false'}\n")
+
+          try:
+              sent = call("sendMessage", chat_id=CHAT,
+                  text="🐈 Codeg session sắp hết hạn. Tạo run mới?",
+                  reply_markup=json.dumps({"inline_keyboard": [[
+                      {"text": "✅ Tạo run mới", "callback_data": "respawn_yes"},
+                      {"text": "⛔ Dừng chuỗi", "callback_data": "respawn_no"}]]}))
+              mid = sent["result"]["message_id"]
+          except Exception as e:
+              print(f"gate send failed: {e}")
+              emit(False)
+              sys.exit(0)
+
+          deadline, offset, approved = time.time() + WINDOW, 0, False
+          while time.time() < deadline:
+              try:
+                  req = urllib.request.Request(
+                      f"https://api.telegram.org/bot{TOKEN}/getUpdates?timeout=25"
+                      f"&offset={offset}&allowed_updates=%5B%22callback_query%22%5D")
+                  with urllib.request.urlopen(req, timeout=35) as r:
+                      payload = json.load(r)
+              except Exception as e:
+                  print(f"poll error, retry: {e}")
+                  time.sleep(5)
+                  continue
+              for upd in payload.get("result", []):
+                  offset = max(offset, upd["update_id"] + 1)
+                  cq = upd.get("callback_query", {})
+                  if cq.get("message", {}).get("message_id") != mid:
+                      continue
+                  call("answerCallbackQuery", callback_query_id=cq["id"])
+                  if cq.get("data") == "respawn_yes":
+                      edit(mid, "✅ Đã duyệt — đang tạo run mới")
+                      approved = True
+                  elif cq.get("data") == "respawn_no":
+                      edit(mid, "⛔ Không tạo run mới")
+          emit(approved)
+          PY
+
+      # Spawn the next cycle from inside the workflow. GITHUB_TOKEN cannot
+      # trigger workflow_dispatch, so this needs a PAT in WORKFLOW_PAT
+      # (fine-grained: only this repo, Actions: Read and write).
+      - name: Respawn next run
+        if: steps.gate.outputs.approved == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+        run: gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref ci/debug-tmate
 
   # Parallel job: a desktop bundle the client Mac can install and use as the
   # daily driver (no local Rust toolchain needed). Built from the SAME commit
