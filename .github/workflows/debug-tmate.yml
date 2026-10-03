@@ -173,6 +173,9 @@ jobs:
 
       # Telegram approval gate: session stays usable while waiting (the VM
       # is alive until this job ends). 20 min to answer, then stop the chain.
+      # The decision is echoed as GATE_DECISION=... so the local keeper can
+      # spawn the successor with its own gh auth — no PAT needed here
+      # (GITHUB_TOKEN cannot trigger workflow_dispatch).
       - name: Ask Telegram approval to respawn
         id: gate
         if: '!cancelled()'
@@ -199,7 +202,9 @@ jobs:
               except Exception:
                   pass
 
-          def emit(ok):
+          def emit(ok, denied):
+              decision = "approved" if ok else ("denied" if denied else "timeout")
+              print(f"GATE_DECISION={decision}")
               with open(os.environ["GITHUB_OUTPUT"], "a") as f:
                   f.write(f"approved={'true' if ok else 'false'}\n")
 
@@ -212,10 +217,10 @@ jobs:
               mid = sent["result"]["message_id"]
           except Exception as e:
               print(f"gate send failed: {e}")
-              emit(False)
+              emit(False, False)
               sys.exit(0)
 
-          deadline, offset, approved = time.time() + WINDOW, 0, False
+          deadline, offset, approved, denied = time.time() + WINDOW, 0, False, False
           while time.time() < deadline:
               try:
                   req = urllib.request.Request(
@@ -234,21 +239,15 @@ jobs:
                       continue
                   call("answerCallbackQuery", callback_query_id=cq["id"])
                   if cq.get("data") == "respawn_yes":
-                      edit(mid, "✅ Đã duyệt — đang tạo run mới")
+                      edit(mid, "✅ Đã duyệt — keeper sẽ tạo run mới")
                       approved = True
+                      break
                   elif cq.get("data") == "respawn_no":
                       edit(mid, "⛔ Không tạo run mới")
-          emit(approved)
+                      denied = True
+                      break
+          emit(approved, denied)
           PY
-
-      # Spawn the next cycle from inside the workflow. GITHUB_TOKEN cannot
-      # trigger workflow_dispatch, so this needs a PAT in WORKFLOW_PAT
-      # (fine-grained: only this repo, Actions: Read and write).
-      - name: Respawn next run
-        if: steps.gate.outputs.approved == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
-        run: gh workflow run debug-tmate.yml --repo truongtv22/codeg --ref ci/debug-tmate
 
   # Parallel job: a desktop bundle the client Mac can install and use as the
   # daily driver (no local Rust toolchain needed). Built from the SAME commit
