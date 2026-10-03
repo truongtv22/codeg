@@ -37,6 +37,17 @@
         "working_dir": {
           "type": "string",
           "description": "Absolute path the sub-agent runs in. Defaults to this session's working directory."
+        },
+        "mode_id": {
+          "type": "string",
+          "description": "Optional session-mode id to run this sub-agent in — the same id the agent exposes as its mode selector in codeg's composer. For most agents that is the permission / plan mode, NOT the model; use config_values for the model. Overrides the per-agent default configured in codeg's multi-agent settings; omit it to use that default."
+        },
+        "config_values": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Optional per-call session config overrides — e.g. {\"model\": \"<model-id>\"} to run THIS sub-agent on a specific model. Use the same keys and value ids the agent exposes in codeg's composer selectors. Each key overrides the per-agent default from codeg's multi-agent settings for this call only; other defaults still apply. A key or value the agent does not offer is skipped (the agent default stays in force), so verify the sub-agent's output and re-delegate with a corrected value if the wrong model ran."
         }
       }
     }

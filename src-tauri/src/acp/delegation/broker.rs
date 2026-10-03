@@ -2460,14 +2460,21 @@ impl DelegationBroker {
         }
 
         // --- Spawn child connection --------------------------------------------
-        // Pull per-agent overrides from the broker config (defaults to empty).
-        // Cloning is cheap — `AgentDelegationDefaults` is at most one Option<String>
-        // and a small BTreeMap, and the spawner consumes both fields by value.
-        let (preferred_mode_id, preferred_config_values) = cfg
+        // Pull per-agent overrides from the broker config (defaults to empty),
+        // then let per-call overrides from the `delegate_to_agent` arguments
+        // win field-wise: `mode_id` replaces the default mode outright, and
+        // each `config_values` key replaces that key only (keys the defaults
+        // don't carry are added). Cloning is cheap — `AgentDelegationDefaults`
+        // is at most one Option<String> and a small BTreeMap, and the spawner
+        // consumes both fields by value.
+        let defaults = cfg
             .agent_defaults
             .get(&req.agent_type)
-            .map(|d: &AgentDelegationDefaults| (d.mode_id.clone(), d.config_values.clone()))
-            .unwrap_or((None, BTreeMap::new()));
+            .cloned()
+            .unwrap_or_default();
+        let preferred_mode_id = req.mode_id.clone().or(defaults.mode_id);
+        let mut preferred_config_values = defaults.config_values;
+        preferred_config_values.extend(req.config_values);
         // Checkpoint #1 (opportunistic): if a parent cancel already landed
         // during the claim/depth phase, bail before spawning a child the parent
         // has abandoned. No child exists yet, so there's nothing to tear down.
@@ -4657,6 +4664,8 @@ mod tests {
             working_dir: None,
             requested_working_dir: None,
             external_handle: None,
+            mode_id: None,
+            config_values: BTreeMap::new(),
         }
     }
 
@@ -5375,6 +5384,71 @@ mod tests {
         assert_eq!(call.agent_type, AgentType::ClaudeCode);
         assert_eq!(call.preferred_mode_id.as_deref(), Some("auto"));
         assert_eq!(call.preferred_config_values, claude_cfg);
+    }
+
+    #[tokio::test]
+    async fn per_call_overrides_win_over_agent_defaults() {
+        // A `delegate_to_agent` call carrying mode_id / config_values must
+        // win field-wise over the per-agent defaults: `mode_id` replaces the
+        // default outright, a repeated config key replaces that key's value,
+        // and keys the defaults don't carry are added.
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("child-1".into())).await;
+        mock.queue_send(Err(SpawnerError::Send("stop after spawn".into())))
+            .await;
+        let broker =
+            DelegationBroker::new(mock.clone() as Arc<dyn ConnectionSpawner>, shallow_lookup());
+
+        let mut agent_defaults = BTreeMap::new();
+        agent_defaults.insert(
+            AgentType::ClaudeCode,
+            AgentDelegationDefaults {
+                mode_id: Some("auto".into()),
+                config_values: BTreeMap::from([
+                    ("model".into(), "claude-sonnet-4-5".into()),
+                    ("effort".into(), "medium".into()),
+                ]),
+            },
+        );
+        broker
+            .set_config(DelegationConfig {
+                enabled: true,
+                depth_limit: 8,
+                agent_defaults,
+                ..DelegationConfig::default()
+            })
+            .await;
+
+        let mut req = request(1, "pt-1");
+        req.mode_id = Some("plan".into());
+        req.config_values = BTreeMap::from([("model".into(), "claude-opus-4-5".into())]);
+        let _ = broker.handle_request(req).await;
+
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 1);
+        let call = &args[0];
+        assert_eq!(call.preferred_mode_id.as_deref(), Some("plan"));
+        assert_eq!(
+            call.preferred_config_values,
+            BTreeMap::from([
+                ("model".into(), "claude-opus-4-5".into()),
+                ("effort".into(), "medium".into()),
+            ])
+        );
+
+        // And a request WITHOUT overrides still lands on the defaults
+        // (no leakage of the previous call's overrides).
+        mock.queue_spawn(Ok("child-2".into())).await;
+        mock.queue_send(Err(SpawnerError::Send("stop after spawn".into())))
+            .await;
+        let _ = broker.handle_request(request(1, "pt-2")).await;
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 2);
+        assert_eq!(args[1].preferred_mode_id.as_deref(), Some("auto"));
+        assert_eq!(
+            args[1].preferred_config_values.get("model").map(String::as_str),
+            Some("claude-sonnet-4-5")
+        );
     }
 
     #[tokio::test]

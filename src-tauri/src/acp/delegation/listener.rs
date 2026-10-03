@@ -7,7 +7,7 @@
 //! [`DelegationBroker`]. The listener is the boundary between the wire and
 //! the broker, plus the place where the per-launch token policy is enforced.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1234,6 +1234,33 @@ impl DelegationListener {
             .clone()
             .or_else(|| Some(entry.working_dir.to_string_lossy().to_string()));
 
+        // Per-call model / mode overrides. Both are optional; a value present
+        // but malformed is REJECTED (not dropped) so the parent LLM learns the
+        // call did nothing instead of silently spawning with the defaults.
+        let mode_id = match req.input.get("mode_id") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => Some(s.clone()),
+            Some(_) => {
+                return report_failed(
+                    "invalid_mode_id",
+                    "mode_id must be a non-empty string",
+                );
+            }
+        };
+        let config_values = match req.input.get("config_values") {
+            None | Some(serde_json::Value::Null) => BTreeMap::new(),
+            Some(v) => match serde_json::from_value::<BTreeMap<String, String>>(v.clone()) {
+                Ok(m) if !m.is_empty() => m,
+                Ok(_) => BTreeMap::new(),
+                Err(_) => {
+                    return report_failed(
+                        "invalid_config_values",
+                        "config_values must be an object whose values are strings",
+                    );
+                }
+            },
+        };
+
         let delegation_req = DelegationRequest {
             parent_connection_id: req.parent_connection_id,
             parent_conversation_id,
@@ -1243,6 +1270,8 @@ impl DelegationListener {
             working_dir,
             requested_working_dir,
             external_handle: req.external_handle,
+            mode_id,
+            config_values,
         };
         self.broker.start_delegation(delegation_req).await
     }
@@ -2184,6 +2213,85 @@ mod tests {
         assert_eq!(report.error_code.as_deref(), Some("invalid_agent_type"));
     }
 
+    /// A malformed per-call override is REJECTED (not silently dropped), so
+    /// the parent LLM learns the call would have done nothing; a well-formed
+    /// one is parsed verbatim into the broker request.
+    #[tokio::test]
+    async fn per_call_overrides_parsed_and_validated() {
+        let tokens = Arc::new(TokenRegistry::default());
+        tokens
+            .register(
+                "tok".into(),
+                TokenEntry {
+                    parent_connection_id: "parent-conn".into(),
+                    working_dir: PathBuf::from("/tmp"),
+                },
+            )
+            .await;
+
+        let make = |mock: Arc<MockSpawner>| {
+            let tokens = tokens.clone();
+            async move { make_listener(make_broker(mock).await, tokens, Some(1)) }
+        };
+
+        // Non-object config_values → failed report, no delegation started.
+        let mock = Arc::new(MockSpawner::new());
+        let listener = make(mock.clone()).await;
+        let report = listener
+            .process(
+                make_request(json!({
+                    "agent_type": "codex",
+                    "task": "x",
+                    "config_values": "gpt-5"
+                }))
+                .await,
+            )
+            .await;
+        assert_eq!(report.error_code.as_deref(), Some("invalid_config_values"));
+        assert!(mock.spawn_args.lock().await.is_empty());
+
+        // Non-string mode_id → failed report, no delegation started.
+        let mock = Arc::new(MockSpawner::new());
+        let listener = make(mock.clone()).await;
+        let report = listener
+            .process(
+                make_request(json!({
+                    "agent_type": "codex",
+                    "task": "x",
+                    "mode_id": 7
+                }))
+                .await,
+            )
+            .await;
+        assert_eq!(report.error_code.as_deref(), Some("invalid_mode_id"));
+        assert!(mock.spawn_args.lock().await.is_empty());
+
+        // Well-formed overrides parse through to the spawn call verbatim.
+        let mock = Arc::new(MockSpawner::new());
+        mock.queue_spawn(Ok("child-conn".into())).await;
+        mock.queue_send(Err(SpawnerError::Send("stop after spawn".into())))
+            .await;
+        let listener = make(mock.clone()).await;
+        let _ = listener
+            .process(
+                make_request(json!({
+                    "agent_type": "codex",
+                    "task": "x",
+                    "mode_id": "plan",
+                    "config_values": {"model": "gpt-5.2"}
+                }))
+                .await,
+            )
+            .await;
+        let args = mock.spawn_args.lock().await;
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].preferred_mode_id.as_deref(), Some("plan"));
+        assert_eq!(
+            args[0].preferred_config_values.get("model").map(String::as_str),
+            Some("gpt-5.2")
+        );
+    }
+
     /// Full async round-trip through the listener: `delegate_to_agent` returns a
     /// Running ack, the lifecycle resolves the child via `complete_call`, and a
     /// follow-up `get_delegation_status` collects the Completed result.
@@ -2287,6 +2395,8 @@ mod tests {
                 working_dir: None,
                 requested_working_dir: None,
                 external_handle: None,
+                mode_id: None,
+                config_values: BTreeMap::new(),
             })
             .await;
         let task_id = ack.task_id.clone().expect("running task carries an id");
@@ -2542,6 +2652,8 @@ mod tests {
                 working_dir: None,
                 requested_working_dir: None,
                 external_handle: None,
+                mode_id: None,
+                config_values: BTreeMap::new(),
             })
             .await;
         let task_id = ack.task_id.clone().unwrap();
@@ -2593,6 +2705,8 @@ mod tests {
                     working_dir: None,
                     requested_working_dir: None,
                     external_handle: Some("h-1".into()),
+                    mode_id: None,
+                    config_values: BTreeMap::new(),
                 };
                 broker.handle_request(req).await
             })
