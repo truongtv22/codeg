@@ -3506,12 +3506,15 @@ async fn emit_session_config_options_values(
     // `config_option_update` push — is filtered by one rule.
     let pinned = state.read().await.env_pinned_config_option_ids.clone();
     let visible = visible_config_options(&pinned, config_options);
+    let mapped = map_session_config_options(&visible);
+    // Best-effort: remember the model list this session advertised so
+    // `delegate_to_agent`'s schema can offer real ids (see
+    // `delegation::agent_models`).
+    crate::acp::delegation::agent_models::record_for_state(state, &mapped).await;
     emit_with_state(
         state,
         emitter,
-        AcpEvent::SessionConfigOptions {
-            config_options: map_session_config_options(&visible),
-        },
+        AcpEvent::SessionConfigOptions { config_options: mapped },
     )
     .await;
 }
@@ -3874,6 +3877,9 @@ async fn emit_session_config_options_info(
     emitter: &EventEmitter,
     config_options: Vec<SessionConfigOptionInfo>,
 ) {
+    // Same delegation-schema hint as `emit_session_config_options_values` —
+    // this covers Grok's synthesized (non-standard) selectors.
+    crate::acp::delegation::agent_models::record_for_state(state, &config_options).await;
     emit_with_state(
         state,
         emitter,
@@ -5471,6 +5477,20 @@ where
     if !disabled_builtins.is_empty() {
         args.push("--disabled-agents".to_string());
         args.push(disabled_builtins.join(","));
+    }
+    if flags.delegation {
+        // Last-known model choices per agent, so the companion's
+        // `delegate_to_agent` description can offer REAL model ids instead of
+        // the LLM guessing one and silently missing. Omitted when nothing has
+        // been observed yet this run — same older-binary compat rule as the
+        // two flags above.
+        let known_models = crate::acp::delegation::agent_models::snapshot().await;
+        if !known_models.is_empty() {
+            if let Ok(json) = serde_json::to_string(&known_models) {
+                args.push("--agent-models".to_string());
+                args.push(json);
+            }
+        }
     }
     server = server.args(args);
     servers.push(McpServer::Stdio(server));
