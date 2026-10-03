@@ -24,6 +24,12 @@ name: Debug session (SSH via bore)
 
 on:
   workflow_dispatch:
+    inputs:
+      with_ssh_session:
+        description: "Also run the ubuntu SSH debug session (unchecked = only build the macOS desktop bundle)"
+        type: boolean
+        required: false
+        default: true
 
 env:
   RUST_BACKTRACE: short
@@ -35,6 +41,9 @@ env:
 
 jobs:
   debug:
+    # Desktop-bundle-only dispatches skip the 6h SSH session so a bundle
+    # request doesn't park an idle ubuntu runner.
+    if: ${{ inputs.with_ssh_session != false }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
