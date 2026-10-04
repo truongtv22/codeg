@@ -17,7 +17,13 @@ REMOTE_HOST="${REMOTE_DEV_HOST:-bore.pub}"
 REMOTE_PORT="${REMOTE_DEV_PORT:?export REMOTE_DEV_PORT=<port> trước khi chạy (xem artifact remote-dev-connection)}"
 REMOTE_USER="${REMOTE_DEV_USER:-runner}"
 REMOTE_DIR="${REMOTE_DEV_DIR:-work/codeg/codeg}"
-SSH_OPTS=(-p "$REMOTE_PORT" "${REMOTE_USER}@${REMOTE_HOST}")
+# Key: mặc định thử key đặt tên theo convention GitHub trước (id_ed25519_github),
+# override bằng REMOTE_DEV_KEY. Tunnel qua relay công cộng hay bị NAT cắt ngầm khi
+# nghỉ traffic — ServerAliveInterval giữ nó sống, ExitOnForwardFailure bắt chết sớm.
+REMOTE_KEY="${REMOTE_DEV_KEY:-$([ -f "$HOME/.ssh/id_ed25519_github" ] && echo "$HOME/.ssh/id_ed25519_github")}"
+SSH_OPTS=(-p "$REMOTE_PORT" ${REMOTE_KEY:+-i "$REMOTE_KEY"} \
+  -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ExitOnForwardFailure=yes \
+  "${REMOTE_USER}@${REMOTE_HOST}")
 
 # Verify workspace path trước khi rsync/scp mù quáng (tên dir phụ thuộc tên repo).
 ssh "${SSH_OPTS[@]}" "test -d ~/${REMOTE_DIR}/.git || {
