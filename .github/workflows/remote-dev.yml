@@ -1,0 +1,286 @@
+# Remote dev VM trên GitHub macOS runner — session dev 6h không cần Rust
+# toolchain/node_modules/target trên máy local (Mac chỉ giữ source + một
+# devshell .app, ~0.6G).
+#
+# Thay debug-tmate.yml (job ubuntu bỏ hẳn). Tái dùng pattern cũ: bore.pub
+# tunnel, authorized_keys từ actor keys, connection artifact, Telegram notify
+# + respawn gate. KHÔNG fallback tmate: relay tmate.io đã chết (nyc1.tmate.io
+# không resolve — xem header debug-tmate.yml cũ); sshd fail sớm với log rõ.
+#
+# Một origin duy nhất: codeg-server :8787 serve `out/` (static export) làm UI.
+# Transport web bắt baseUrl = window.location.origin (src/lib/transport/index.ts)
+# nên UI phải đứng cùng origin với API — next dev :3000 bị loại vì lý do này
+# (rewrites không proxy được /ws/events). Sửa frontend = rsync + `pnpm build`
+# trên VM (~1-2 phút) + refresh.
+#
+# Cách dùng:
+#   gh workflow run remote-dev.yml --repo truongtv22/codeg --ref ci/remote-dev-vm
+#   1. Tải artifact 'remote-dev-connection' (publish ngay sau tunnel, xem được
+#      trong lúc job chạy).
+#   2. Máy client: export REMOTE_DEV_PORT=<port> rồi chạy
+#      scripts/remote-dev-connect.sh (connect|push|fe|build|pull).
+#
+# Chỉ SSH key đã đăng ký trên tài khoản GitHub kích hoạt được phép kết nối.
+# sshd sống qua disconnect — reconnect bất kỳ lúc nào trong 6h.
+
+name: Remote dev VM (macOS)
+
+on:
+  workflow_dispatch: {}
+
+# 1 session VM dev tại một thời điểm — dispatch vô ý thứ hai không đốt runner 6h.
+# Không cancel: run sau xếp hàng chờ, không giết session đang chạy.
+concurrency:
+  group: remote-dev-vm
+  cancel-in-progress: false
+
+env:
+  RUST_BACKTRACE: short
+  HUSKY: 0
+  # Token web UI hỏi khi vào. Mặc định ổn cho session throwaway: chốt chặn thật
+  # là SSH-key auth trên tunnel, port đổi mỗi session. Set secret CODEG_TOKEN
+  # để pin giá trị của riêng bạn.
+  CODEG_TOKEN: ${{ secrets.CODEG_TOKEN || 'codeg-debug-8787' }}
+
+jobs:
+  remote-dev:
+    runs-on: macos-latest
+    timeout-minutes: 355 # dưới trần 6h, chừa gate + dọn dẹp
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- Tunnel SSH TRƯỚC (fail fast ~2-3 phút trước khi build) ----
+      - name: Start SSH tunnel
+        env:
+          ACTOR: ${{ github.actor }}
+        run: |
+          # sshd — image macOS KHÔNG document sshd sẵn (xem research-01 trong
+          # plans/261004-remote-dev-vm-macos). Thử Remote Login, fallback
+          # launchctl. Cả hai fail → job chết sớm ở đây (đúng triết lý fail fast).
+          SSHD_OK=1
+          sudo systemsetup -setremotelogin on 2>/dev/null \
+            || sudo launchctl load -w /System/Library/LaunchDaemons/ssh.plist 2>/dev/null \
+            || SSHD_OK=0
+          if [ "$SSHD_OK" = "1" ]; then
+            sleep 2
+            nc -z localhost 22 || SSHD_OK=0
+          fi
+          [ "$SSHD_OK" = "1" ] || { echo "FATAL: không bật được sshd trên runner"; exit 1; }
+
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          # Chỉ key đã đăng ký trên tài khoản GitHub kích hoạt được phép kết nối.
+          curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
+            >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys
+
+          # bore có asset darwin-aarch64 chính thức (research-01, VERIFIED).
+          BORE_VER=0.5.0
+          curl -sL "https://github.com/ekzhang/bore/releases/download/v${BORE_VER}/bore-v${BORE_VER}-aarch64-apple-darwin.tar.gz" \
+            | sudo tar xz -C /usr/local/bin bore
+          nohup /usr/local/bin/bore local 22 --to bore.pub > /tmp/bore.log 2>&1 &
+          PORT=""
+          # Parse port public bore gán (format tùy version: remote_port=NNNNN | bore.pub:NNNNN).
+          for i in $(seq 1 20); do
+            PORT=$(grep -oE "remote_port=[0-9]+|bore\.pub:[0-9]+" /tmp/bore.log \
+              | grep -oE "[0-9]+$" | head -1)
+            [ -n "$PORT" ] && break
+            sleep 2
+          done
+          [ -n "$PORT" ] || { echo "FATAL: bore tunnel không thiết lập được"; cat /tmp/bore.log; exit 1; }
+
+          cat > /tmp/connection.txt <<EOF
+          Tunnel:      bore (port $PORT)
+          SSH:         ssh -p $PORT runner@bore.pub
+          Forward:     ssh -L 8787:localhost:8787 -p $PORT runner@bore.pub
+          Path .app:   $GITHUB_WORKSPACE/src-tauri/target/aarch64-apple-darwin/debug/bundle/macos/codeg.app
+          Client:      export REMOTE_DEV_PORT=$PORT && scripts/remote-dev-connect.sh (connect|push|fe|build|pull)
+          UI:          http://localhost:8787 (qua tunnel) — token: giá trị CODEG_TOKEN
+          Lưu ý:       .app devshell nạp UI từ http://localhost:8787 — mở bằng 127.0.0.1 sẽ lệch origin (IPC).
+          EOF
+          cat /tmp/connection.txt
+
+      - name: Publish connection info
+        uses: actions/upload-artifact@v4
+        with:
+          name: remote-dev-connection
+          path: /tmp/connection.txt
+          retention-days: 1
+
+      # ---- Toolchain + cache (khớp pattern build-desktop của debug-tmate cũ) ----
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      # Session thường kết thúc bằng disconnect (job failed) — vẫn lưu cache để
+      # lần respawn sau không phải cold build.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: desktop-darwin
+          cache-on-failure: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      # ---- Static export cho UI (codeg-server serve `out/`) ----
+      - name: Build frontend (static export)
+        run: pnpm build
+
+      # ---- Devshell .app: webview nạp http://localhost:8787, không nhúng asset ----
+      - name: Build devshell app
+        run: |
+          pnpm tauri build --debug --target aarch64-apple-darwin \
+            --config src-tauri/tauri.devshell.conf.json \
+            --bundles app
+          APP=$(find src-tauri/target/aarch64-apple-darwin/debug/bundle/macos \
+            -name "*.app" | head -1)
+          [ -n "$APP" ] || { echo "FATAL: devshell .app không tìm thấy"; exit 1; }
+          ditto -c -k --keepParent "$APP" codeg-devshell-darwin-arm64.zip
+
+      - name: Upload devshell app
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-devshell-darwin-arm64
+          path: codeg-devshell-darwin-arm64.zip
+          retention-days: 3
+
+      # ---- codeg-server :8787 — UI (out/) + API + WS cùng origin ----
+      # Build DEBUG để chia cache với devshell build (cùng target/).
+      - name: Build + start codeg-server
+        working-directory: src-tauri
+        run: |
+          cargo build --bin codeg-server --no-default-features --features server-bin
+          CODEG_STATIC_DIR=out CODEG_PORT=8787 \
+            nohup ./target/debug/codeg-server </dev/null \
+            > /tmp/codeg-server.log 2>&1 &
+          sleep 4
+          curl -s -o /dev/null -w "server http: %{http_code}\n" --max-time 5 \
+            http://localhost:8787
+
+      # Telegram ping để nhận session kể cả khi Mac local ngủ. No-op khi thiếu secrets.
+      - name: Notify Telegram (session ready)
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "telegram not configured; skip"; exit 0; }
+          # connection.txt có indent 10 space (heredoc) — grep -oE bắt đúng pattern.
+          SSH_LINE=$(grep -oE "ssh -p [0-9]+ runner@bore\.pub" /tmp/connection.txt | head -1)
+          TEXT="✅ ${GITHUB_REPOSITORY} — remote dev VM ready
+          $SSH_LINE
+          UI: http://localhost:8787 (forward từ máy bạn)
+          Token: giá trị secret CODEG_TOKEN"
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="$CHAT" --data-urlencode "text=$TEXT" > /dev/null
+          echo "telegram notified"
+
+      - name: Notify Telegram (failure)
+        if: failure()
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || exit 0
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode "text=❌ ${GITHUB_REPOSITORY} — remote dev VM FAILED (run ${GITHUB_RUN_ID})" \
+            -d chat_id="$CHAT" > /dev/null
+
+      # Giữ job sống; sshd nhận reconnect bất kỳ lúc nào. nohup+wait giữ pipe
+      # stdout mở (runner đọc đến EOF mới kết thúc step) — xác minh ở phase 04.
+      # 270' (KHÔNG 300): trần 360' − pre-steps tới ~40' (lạnh) − gate 20'.
+      # Workflow cũ đã chốt bài học này (290 chứ không phải 355).
+      - name: Keep session alive
+        timeout-minutes: 275
+        run: |
+          nohup sleep 16200 &
+          wait $!
+
+      # Gate Telegram: VM sống tới khi step này xong. 20 phút để trả lời, quá hạn
+      # thì dừng chuỗi. GATE_DECISION in ra log để local keeper đọc (GITHUB_TOKEN
+      # không trigger được workflow_dispatch). Python gate copy VERBATIM từ
+      # debug-tmate.yml — chỉ đổi text message.
+      - name: Ask Telegram approval to respawn
+        id: gate
+        if: '!cancelled()'
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time, urllib.parse, urllib.request
+
+          TOKEN, CHAT = os.environ["TOKEN"], os.environ["CHAT"]
+          WINDOW = 20 * 60
+
+          def call(method, **p):
+              req = urllib.request.Request(
+                  f"https://api.telegram.org/bot{TOKEN}/{method}",
+                  data=urllib.parse.urlencode(p).encode())
+              with urllib.request.urlopen(req, timeout=35) as r:
+                  return json.load(r)
+
+          def edit(mid, text):
+              try:
+                  call("editMessageText", chat_id=CHAT, message_id=mid, text=text)
+              except Exception:
+                  pass
+
+          def emit(ok, denied):
+              decision = "approved" if ok else ("denied" if denied else "timeout")
+              print(f"GATE_DECISION={decision}")
+              with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+                  f.write(f"approved={'true' if ok else 'false'}\n")
+
+          try:
+              sent = call("sendMessage", chat_id=CHAT,
+                  text="🐈 Codeg remote dev VM sắp hết hạn. Tạo run mới?",
+                  reply_markup=json.dumps({"inline_keyboard": [[
+                      {"text": "✅ Tạo run mới", "callback_data": "respawn_yes"},
+                      {"text": "⛔ Dừng chuỗi", "callback_data": "respawn_no"}]]}))
+              mid = sent["result"]["message_id"]
+          except Exception as e:
+              print(f"gate send failed: {e}")
+              emit(False, False)
+              sys.exit(0)
+
+          deadline, offset, approved, denied = time.time() + WINDOW, 0, False, False
+          while time.time() < deadline:
+              try:
+                  req = urllib.request.Request(
+                      f"https://api.telegram.org/bot{TOKEN}/getUpdates?timeout=25"
+                      f"&offset={offset}&allowed_updates=%5B%22callback_query%22%5D")
+                  with urllib.request.urlopen(req, timeout=35) as r:
+                      payload = json.load(r)
+              except Exception as e:
+                  print(f"poll error, retry: {e}")
+                  time.sleep(5)
+                  continue
+              for upd in payload.get("result", []):
+                  offset = max(offset, upd["update_id"] + 1)
+                  cq = upd.get("callback_query", {})
+                  if cq.get("message", {}).get("message_id") != mid:
+                      continue
+                  call("answerCallbackQuery", callback_query_id=cq["id"])
+                  if cq.get("data") == "respawn_yes":
+                      edit(mid, "✅ Đã duyệt — keeper sẽ tạo run mới")
+                      approved = True
+                      break
+                  elif cq.get("data") == "respawn_no":
+                      edit(mid, "⛔ Không tạo run mới")
+                      denied = True
+                      break
+          emit(approved, denied)
+          PY
