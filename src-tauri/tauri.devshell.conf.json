@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "pnpm tauri:before-dev",
+    "devUrl": "http://localhost:3000",
+    "beforeBuildCommand": "pnpm tauri:prepare-sidecars",
+    "frontendDist": "http://localhost:8787"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  }
+}
