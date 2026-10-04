@@ -21,9 +21,18 @@ REMOTE_DIR="${REMOTE_DEV_DIR:-work/codeg/codeg}"
 # override bằng REMOTE_DEV_KEY. Tunnel qua relay công cộng hay bị NAT cắt ngầm khi
 # nghỉ traffic — ServerAliveInterval giữ nó sống, ExitOnForwardFailure bắt chết sớm.
 REMOTE_KEY="${REMOTE_DEV_KEY:-$([ -f "$HOME/.ssh/id_ed25519_github" ] && echo "$HOME/.ssh/id_ed25519_github")}"
+# IdentitiesOnly: agent không được đưa key nào trước key đúng — bore.pub ngắt
+# kết nối khi thử quá 6 key ("Too many authentication failures").
 SSH_OPTS=(-p "$REMOTE_PORT" ${REMOTE_KEY:+-i "$REMOTE_KEY"} \
+  -o IdentitiesOnly=yes \
   -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ExitOnForwardFailure=yes \
   "${REMOTE_USER}@${REMOTE_HOST}")
+# rsync/scp không nhận mảng SSH_OPTS — dựng chuỗi -e riêng, cùng key + IdentitiesOnly.
+RSYNC_SSH="ssh -p ${REMOTE_PORT} -o IdentitiesOnly=yes ${REMOTE_KEY:+-i ${REMOTE_KEY}}"
+# ssh non-interactive không thấy PATH của job steps: runner macos-latest cài node
+# qua homebrew (/opt/homebrew/bin), pnpm qua action-setup (~/setup-pnpm/...).
+# CI=true: pnpm không được hỏi xác nhận purge node_modules khi không có TTY.
+REMOTE_ENV='export PATH="/opt/homebrew/bin:$HOME/setup-pnpm/node_modules/.bin:$PATH" CI=true'
 
 # Verify workspace path trước khi rsync/scp mù quáng (tên dir phụ thuộc tên repo).
 ssh "${SSH_OPTS[@]}" "test -d ~/${REMOTE_DIR}/.git || {
@@ -36,7 +45,7 @@ case "$cmd" in
     exec ssh "${SSH_OPTS[@]}" -L 8787:localhost:8787
     ;;
   push)
-    rsync -az -e "ssh -p ${REMOTE_PORT}" \
+    rsync -az -e "$RSYNC_SSH" \
       --exclude node_modules --exclude .next --exclude out --exclude target \
       --exclude .git --exclude coverage \
       --exclude ".env" --exclude ".env.*" \
@@ -45,12 +54,12 @@ case "$cmd" in
     ;;
   fe)
     "$0" push
-    ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR} && pnpm build"
+    ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR} && ${REMOTE_ENV} && pnpm build"
     echo "UI đã build lại — refresh browser/.app tại http://localhost:8787."
     ;;
   build)
     "$0" push
-    ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR} && \
+    ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR} && ${REMOTE_ENV} && \
       pnpm tauri build --debug --target aarch64-apple-darwin \
         --config src-tauri/tauri.devshell.conf.json --bundles app"
     "$0" pull
@@ -59,11 +68,14 @@ case "$cmd" in
     APP_DIR="src-tauri/target/aarch64-apple-darwin/debug/bundle/macos"
     ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR}/${APP_DIR} && \
       ditto -c -k --keepParent codeg.app /tmp/codeg-devshell.zip"
-    scp -P "$REMOTE_PORT" \
+    scp ${REMOTE_KEY:+-i "$REMOTE_KEY"} -o IdentitiesOnly=yes -P "$REMOTE_PORT" \
       "${REMOTE_USER}@${REMOTE_HOST}:/tmp/codeg-devshell.zip" /tmp/codeg-devshell.zip
     rm -rf /tmp/codeg-devshell.app
+    # Zip bên VM đóng bằng --keepParent codeg.app → extract ra codeg.app, đổi
+    # tên devshell để không đè Codeg.app thật của máy.
     ditto -x -k /tmp/codeg-devshell.zip /tmp/
-    echo ".app ở /tmp/codeg-devshell.app — kéo vào /Applications để thay bản cũ."
+    mv /tmp/codeg.app /tmp/codeg-devshell.app
+    echo ".app ở /tmp/codeg-devshell.app — kéo vào ~/Applications để thay bản cũ."
     ;;
   *)
     echo "Lệnh không rõ: $cmd (connect|push|fe|build|pull)" >&2
