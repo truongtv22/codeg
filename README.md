@@ -197,6 +197,8 @@ docker run -d -p 3080:3080 -v codeg-data:/data ghcr.io/xintaofei/codeg:latest
 
 **Mobile** — install the [iOS app](https://apps.apple.com/app/codeg-client/id6785199071) or the [Android APK](https://github.com/xintaofei/codeg-android/releases/latest), then point it at the **Web Service** of your desktop app or at your own `codeg-server`: URL, token, done. Pairing steps in [Mobile apps](https://docs.codeg.app/getting-started/installation#mobile-apps).
 
+**Remote dev VM** — develop Codeg itself without a local Rust toolchain: a `workflow_dispatch` rents a 6-hour GitHub macOS VM that holds the toolchain, caches, and `target/`, while your Mac keeps only the source and a debug `.app` (~0.6 GB total). See [Remote dev workflow](./docs/remote-dev-workflow.md).
+
 Compose, prebuilt binaries, source builds, and in-place updates are covered in [Deployment](https://docs.codeg.app/getting-started/deployment); environment variables in [Configuration](https://docs.codeg.app/getting-started/configuration). Building Codeg itself: [Development](https://docs.codeg.app/reference/development) and [Architecture](https://docs.codeg.app/reference/architecture).
 
 ## 🔒 Privacy & Security

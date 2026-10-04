@@ -3506,12 +3506,15 @@ async fn emit_session_config_options_values(
     // `config_option_update` push — is filtered by one rule.
     let pinned = state.read().await.env_pinned_config_option_ids.clone();
     let visible = visible_config_options(&pinned, config_options);
+    let mapped = map_session_config_options(&visible);
+    // Best-effort: remember the model list this session advertised so
+    // `delegate_to_agent`'s schema can offer real ids (see
+    // `delegation::agent_models`).
+    crate::acp::delegation::agent_models::record_for_state(state, &mapped).await;
     emit_with_state(
         state,
         emitter,
-        AcpEvent::SessionConfigOptions {
-            config_options: map_session_config_options(&visible),
-        },
+        AcpEvent::SessionConfigOptions { config_options: mapped },
     )
     .await;
 }
@@ -3874,6 +3877,9 @@ async fn emit_session_config_options_info(
     emitter: &EventEmitter,
     config_options: Vec<SessionConfigOptionInfo>,
 ) {
+    // Same delegation-schema hint as `emit_session_config_options_values` —
+    // this covers Grok's synthesized (non-standard) selectors.
+    crate::acp::delegation::agent_models::record_for_state(state, &config_options).await;
     emit_with_state(
         state,
         emitter,
@@ -5471,6 +5477,20 @@ where
     if !disabled_builtins.is_empty() {
         args.push("--disabled-agents".to_string());
         args.push(disabled_builtins.join(","));
+    }
+    if flags.delegation {
+        // Last-known model choices per agent, so the companion's
+        // `delegate_to_agent` description can offer REAL model ids instead of
+        // the LLM guessing one and silently missing. Omitted when nothing has
+        // been observed yet this run — same older-binary compat rule as the
+        // two flags above.
+        let known_models = crate::acp::delegation::agent_models::snapshot().await;
+        if !known_models.is_empty() {
+            if let Ok(json) = serde_json::to_string(&known_models) {
+                args.push("--agent-models".to_string());
+                args.push(json);
+            }
+        }
     }
     server = server.args(args);
     servers.push(McpServer::Stdio(server));
@@ -8355,6 +8375,132 @@ fn heal_retired_context_lane_picks(
         .collect()
 }
 
+/// Rewrite model picks the session's own advertised list rejects onto the
+/// closest value it does offer, so a natural-language spelling from a parent
+/// LLM (`gemini-3.7-flash`, `Gemini 3.7 Flash`) lands on a real effort
+/// variant (`gemini-3.7-flash-high`) instead of being skipped in favor of
+/// the agent default — the exact failure of a first delegation launched
+/// before any model list reached `delegation::agent_models`.
+///
+/// Resolution ladder, first match wins, judged against the agent's OWN
+/// advertised (value, name) pairs, so a resolved value is by construction
+/// one the agent offers:
+///
+///   1. case-insensitive exact match on the value id
+///   2. normalized exact match on the value id
+///   3. normalized exact match on the display name
+///   4. normalized prefix match on the value id
+///   5. normalized prefix match on the display name
+///
+/// Normalization folds case, spaces/underscores to `-`, and drops everything
+/// outside `[a-z0-9.-]`, so `Gemini 3.7 Flash (High)` and `gemini_3.7_flash`
+/// both read `gemini-3.7-flash-high`. A prefix may match several effort
+/// variants (`gemini-3.7-flash` → `-high` and `-medium`); the first in the
+/// agent's advertised order wins — the caller asked for the model, not the
+/// effort, so any listed variant honors the pick. Deliberately narrow: only
+/// the model selector (see [`is_model_config_option`]), and only when
+/// [`config_option_rejects_value`] proves the exact value gone, so a pick the
+/// agent still offers is never touched.
+///
+/// ponytail: picking among same-prefix effort variants is heuristic; an agent
+/// whose same-prefix rows are NOT interchangeable needs a per-agent gate like
+/// [`heal_retired_context_lane_picks`] has.
+fn resolve_rejected_model_picks(
+    options: &[SessionConfigOption],
+    preferred: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    preferred
+        .iter()
+        .map(|(config_id, value_id)| {
+            let resolved = options
+                .iter()
+                .find(|o| o.id.to_string() == *config_id)
+                .filter(|o| is_model_config_option(o))
+                .filter(|o| config_option_rejects_value(o, value_id))
+                .and_then(|o| resolve_model_value(o, value_id));
+            match resolved {
+                Some(resolved) => {
+                    tracing::info!(
+                        "[ACP] preferred config '{config_id}'='{value_id}' is not offered; \
+                         resolving to '{resolved}', the closest value the agent lists"
+                    );
+                    (config_id.clone(), resolved)
+                }
+                None => (config_id.clone(), value_id.clone()),
+            }
+        })
+        .collect()
+}
+
+/// Fold a model id or display name to its comparable form: lowercase, spaces
+/// and underscores to `-`, everything outside `[a-z0-9.-]` dropped.
+fn normalize_model_token(raw: &str) -> String {
+    raw.to_ascii_lowercase()
+        .chars()
+        .map(|c| match c {
+            ' ' | '_' => '-',
+            other => other,
+        })
+        .filter(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == '-' || *c == '.')
+        .collect()
+}
+
+/// The closest advertised value for a rejected model pick, per the ladder in
+/// [`resolve_rejected_model_picks`]. `None` leaves the pick to be skipped.
+fn resolve_model_value(option: &SessionConfigOption, requested: &str) -> Option<String> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+    let advertised: Vec<(String, String)> = match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .map(|o| (o.value.to_string(), o.name.clone()))
+            .collect(),
+        SessionConfigSelectOptions::Grouped(groups) => groups
+            .iter()
+            .flat_map(|g| g.options.iter().map(|o| (o.value.to_string(), o.name.clone())))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if advertised.is_empty() {
+        return None;
+    }
+    if let Some(hit) = advertised
+        .iter()
+        .find(|e| e.0.eq_ignore_ascii_case(requested))
+    {
+        return Some(hit.0.clone());
+    }
+    let requested = normalize_model_token(requested);
+    if requested.is_empty() {
+        return None;
+    }
+    let exact = |key: fn(&(String, String)) -> String| {
+        advertised
+            .iter()
+            .find(|e| key(e) == requested)
+            .map(|e| e.0.clone())
+    };
+    if let Some(resolved) = exact(|e| normalize_model_token(&e.0)) {
+        return Some(resolved);
+    }
+    if let Some(resolved) = exact(|e| normalize_model_token(&e.1)) {
+        return Some(resolved);
+    }
+    let prefix = |key: fn(&(String, String)) -> String| {
+        advertised
+            .iter()
+            .find(|e| {
+                let token = key(e);
+                token.starts_with(&requested)
+                    && (token.len() == requested.len()
+                        || token.as_bytes().get(requested.len()) == Some(&b'-'))
+            })
+            .map(|e| e.0.clone())
+    };
+    prefix(|e| normalize_model_token(&e.0)).or_else(|| prefix(|e| normalize_model_token(&e.1)))
+}
+
 /// [`config_option_rejects_value`] for the mode channel: whether the session's
 /// OWN mode list proves a saved `preferred_mode_id` cannot be selected, so
 /// `session/set_mode` for it at connect is a guaranteed error.
@@ -8566,6 +8712,12 @@ async fn apply_preferred_session_options(
     // from, so the replay, the screen and the ledger all see one value.
     let preferred_config_values =
         &heal_retired_context_lane_picks(agent_type, &options, preferred_config_values);
+    // A model pick spelled the way a parent LLM phrases it (`gemini-3.7-flash`,
+    // `Gemini 3.7 Flash`) resolves onto the closest value the agent lists —
+    // see `resolve_rejected_model_picks`. Resolved once, against the same
+    // INITIAL list as the heal above, so the replay, the screen and the ledger
+    // all see one value.
+    let preferred_config_values = &resolve_rejected_model_picks(&options, preferred_config_values);
     // Model first — see `order_preferred_config_values`. Ordered once against
     // the INITIAL list: every later list is the same agent's answer to a set,
     // so the model selector cannot move between ids mid-replay.
@@ -25272,6 +25424,46 @@ mod tests {
         }))
         .expect("parses");
         assert!(!config_option_rejects_value(&toggle, "true"));
+    }
+
+    /// The model list the Antigravity ACP adapter answers `session/new` with:
+    /// every id embeds an effort suffix, so a parent LLM's natural-language
+    /// spelling never matches exactly.
+    fn antigravity_model_option() -> SessionConfigOption {
+        serde_json::from_value(serde_json::json!({
+            "id": "model",
+            "name": "Model",
+            "type": "select",
+            "currentValue": "gemini-3.8-flash-high",
+            "options": [
+                {"value": "gemini-3.8-flash-high", "name": "Gemini 3.8 Flash (High)"},
+                {"value": "gemini-3.7-flash-medium", "name": "Gemini 3.7 Flash (Medium)"},
+                {"value": "gemini-3.7-flash-high", "name": "Gemini 3.7 Flash (High)"}
+            ],
+        }))
+        .expect("parses")
+    }
+
+    #[test]
+    fn resolve_rejected_model_picks_maps_natural_language_spellings() {
+        let options = vec![antigravity_model_option()];
+        let preferred: BTreeMap<String, String> = [
+            ("a", "GEMINI-3.7-FLASH-HIGH"), // wrongly cased value id
+            ("b", "gemini-3.7-flash"),      // the effort suffix it cannot know
+            ("c", "Gemini 3.7 Flash"),      // display-name spelling
+            ("d", "gemini-3.8-flash-high"), // a value the agent offers
+            ("e", "gemini-9-ultra"),        // nothing matches
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+        let resolved = resolve_rejected_model_picks(&options, &preferred);
+        assert_eq!(resolved["a"], "gemini-3.7-flash-high");
+        // Prefix hits take the FIRST advertised effort variant.
+        assert_eq!(resolved["b"], "gemini-3.7-flash-medium");
+        assert_eq!(resolved["c"], "gemini-3.7-flash-medium");
+        assert_eq!(resolved["d"], "gemini-3.8-flash-high");
+        assert_eq!(resolved["e"], "gemini-9-ultra");
     }
 
     /// The `availableModes` claude-agent-acp 0.81.1 answered `session/new`

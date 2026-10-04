@@ -333,6 +333,13 @@ pub struct CompanionContext {
     /// flag). Disabled customs never appear here: the parent just leaves them
     /// out of `custom_agents`.
     pub disabled_agents: Vec<String>,
+    /// JSON `{agent_slug: [{value, name}, ...]}` — each agent's
+    /// last-advertised model choices, passed via `--agent-models` and folded
+    /// into `config_values`'s description at `tools/list` so the parent LLM
+    /// passes REAL model ids instead of guessing one (a guess the agent
+    /// doesn't offer is silently skipped and the default model runs).
+    /// `Null` when the parent predates the flag or nothing was observed.
+    pub agent_models: serde_json::Value,
 }
 
 /// Per-in-flight-call state. The companion stashes one of these per
@@ -504,6 +511,7 @@ pub async fn dispatch_line(
             };
             remove_disabled_agents_from_delegate_enum(&mut tools, &ctx.disabled_agents);
             append_custom_agents_to_delegate_enum(&mut tools, &ctx.custom_agents);
+            inject_agent_model_lists(&mut tools, &ctx.agent_models);
             LineAction::Respond(ok(id, json!({ "tools": tools })))
         }
         "tools/call" => build_tools_call_spawn(ctx.clone(), inflight, id, req.params).await,
@@ -566,6 +574,72 @@ fn append_custom_agents_to_delegate_enum(tools: &mut Value, custom_agents: &[Str
     for slug in custom_agents {
         if !variants.iter().any(|v| v.as_str() == Some(slug)) {
             variants.push(Value::String(slug.clone()));
+        }
+    }
+}
+
+/// Per-agent cap on enumerated model choices in the description. Agents list
+/// ~5–15 models; the cap keeps a pathological advertisement from ballooning
+/// every `tools/list` payload into parent-LLM context.
+const MAX_MODEL_CHOICES_PER_AGENT: usize = 20;
+
+/// Fold the parent-supplied per-agent model lists into `delegate_to_agent`'s
+/// `config_values` description, so the parent LLM can pass a REAL model id
+/// (`claude-opus-5-5`) instead of guessing from prose ("Opus") — a guess the
+/// agent doesn't offer is skipped and the default model silently runs.
+/// Agents absent from the blob (never observed this run) stay unlisted: the
+/// description already tells the LLM what to do then.
+fn inject_agent_model_lists(tools: &mut Value, agent_models: &Value) {
+    let Some(map) = agent_models.as_object() else {
+        return;
+    };
+    let mut bullets = String::new();
+    for (slug, choices) in map {
+        let Some(items) = choices.as_array() else {
+            continue;
+        };
+        let rendered: Vec<String> = items
+            .iter()
+            .take(MAX_MODEL_CHOICES_PER_AGENT)
+            .filter_map(|c| {
+                let value = c.get("value")?.as_str()?;
+                Some(match c.get("name").and_then(|n| n.as_str()) {
+                    Some(name) if name != value => format!("{value} ({name})"),
+                    _ => value.to_string(),
+                })
+            })
+            .collect();
+        if rendered.is_empty() {
+            continue;
+        }
+        bullets.push_str(&format!("\n- {slug}: {}", rendered.join(", ")));
+    }
+    if bullets.is_empty() {
+        return;
+    }
+    let Some(tools_arr) = tools.as_array_mut() else {
+        return;
+    };
+    let Some(desc) = tools_arr
+        .iter_mut()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("delegate_to_agent"))
+        .and_then(|t| t.pointer_mut("/inputSchema/properties/config_values/description"))
+        .and_then(|d| d.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    if let Some(tool) = tools_arr
+        .iter_mut()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some("delegate_to_agent"))
+    {
+        if let Some(slot) = tool.pointer_mut("/inputSchema/properties/config_values/description") {
+            *slot = Value::String(format!(
+                "{desc}{bullets}\n\nLists come from the last session each agent opened in \
+                 codeg; an agent not listed has no observed list, so pass an exact id from \
+                 the agent's own documentation or omit config_values to use the agent's \
+                 configured default."
+            ));
         }
     }
 }
@@ -3961,6 +4035,7 @@ mod tests {
             features,
             custom_agents: Vec::new(),
             disabled_agents: Vec::new(),
+            agent_models: Value::Null,
         }
     }
 
@@ -4042,6 +4117,73 @@ mod tests {
         assert!(status["inputSchema"]["properties"]["wait_ms"].is_object());
         let required = status["inputSchema"]["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v == "task_ids"));
+    }
+
+    #[tokio::test]
+    async fn agent_model_lists_enrich_config_values_description() {
+        let mut ctx = ctx();
+        ctx.agent_models = json!({
+            "claude_code": [
+                {"value": "claude-opus-5-5", "name": "Opus 5.5"},
+                {"value": "claude-sonnet-5-5", "name": "claude-sonnet-5-5"}
+            ],
+            "codex": [],
+            "broken": "not-an-array"
+        });
+        let line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let resp = unwrap_respond(dispatch_line(&ctx, Arc::new(InflightCalls::new()), line).await);
+        let tools = resp.result.unwrap()["tools"].clone();
+        let desc = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "delegate_to_agent")
+            .unwrap()["inputSchema"]["properties"]["config_values"]["description"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // id + differing label rendered together; same-label entries stay bare.
+        assert!(desc.contains("- claude_code: claude-opus-5-5 (Opus 5.5), claude-sonnet-5-5"));
+        // An agent with no choices and a malformed entry are skipped, not fatal.
+        assert!(!desc.contains("- codex:"));
+        assert!(!desc.contains("- broken:"));
+        // The base guidance and the no-list caveat are both present.
+        assert!(desc.contains("agent not listed"));
+        // Non-delegate tools are untouched.
+        let status_desc = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "get_delegation_status")
+            .unwrap()["inputSchema"]["properties"]["wait_ms"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(!status_desc.contains("claude_code"));
+    }
+
+    #[tokio::test]
+    async fn tools_list_without_agent_models_stays_byte_identical() {
+        let line = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        let resp = unwrap_respond(dispatch_line(&ctx(), Arc::new(InflightCalls::new()), line).await);
+        let tools = resp.result.unwrap()["tools"].clone();
+        let all: Value = serde_json::from_str(TOOL_SCHEMA_JSON).unwrap();
+        // ctx() carries agent_models: Null → the embedded config_values
+        // description must survive unmodified.
+        let embedded = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "delegate_to_agent")
+            .unwrap()["inputSchema"]["properties"]["config_values"]["description"]
+            .clone();
+        let served = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "delegate_to_agent")
+            .unwrap()["inputSchema"]["properties"]["config_values"]["description"]
+            .clone();
+        assert_eq!(embedded, served);
     }
 
     #[tokio::test]
@@ -5418,6 +5560,7 @@ mod tests {
             features: FEEDBACK_ONLY,
             custom_agents: Vec::new(),
             disabled_agents: Vec::new(),
+            agent_models: Value::Null,
         };
         let inflight = Arc::new(InflightCalls::new());
         // tools/call → Spawn (registers the inflight entry).

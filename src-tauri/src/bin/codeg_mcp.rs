@@ -69,6 +69,11 @@ struct Args {
     /// only launchable targets are advertised. Omitted when nothing is
     /// disabled (disabled customs are simply left out of `--custom-agents`).
     disabled_agents: Option<String>,
+    /// JSON blob `{agent_slug: [{value, name}, ...]}` of each agent's
+    /// last-advertised model choices, folded into `delegate_to_agent`'s
+    /// `config_values` description at `tools/list` so the LLM passes real
+    /// model ids. Omitted by older parents or when nothing has been observed.
+    agent_models: Option<String>,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -79,6 +84,7 @@ fn parse_args() -> Result<Args, String> {
     let mut features = None;
     let mut custom_agents = None;
     let mut disabled_agents = None;
+    let mut agent_models = None;
 
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -128,9 +134,15 @@ fn parse_args() -> Result<Args, String> {
                         .ok_or_else(|| "--disabled-agents requires a value".to_string())?,
                 );
             }
+            "--agent-models" => {
+                agent_models = Some(
+                    iter.next()
+                        .ok_or_else(|| "--agent-models requires a value".to_string())?,
+                );
+            }
             "--help" | "-h" => {
                 println!(
-                    "codeg-mcp --parent-connection-id <uuid> --socket-path <path> --token <secret> [--parent-pid <pid>] [--features delegation,feedback,ask,sessions,tasks] [--custom-agents custom:<id>,...] [--disabled-agents <agent>,...]"
+                    "codeg-mcp --parent-connection-id <uuid> --socket-path <path> --token <secret> [--parent-pid <pid>] [--features delegation,feedback,ask,sessions,tasks] [--custom-agents custom:<id>,...] [--disabled-agents <agent>,...] [--agent-models <json>]"
                 );
                 std::process::exit(0);
             }
@@ -146,6 +158,7 @@ fn parse_args() -> Result<Args, String> {
         features,
         custom_agents,
         disabled_agents,
+        agent_models,
     })
 }
 
@@ -190,6 +203,13 @@ async fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // A malformed blob must not take the companion down — enrichment is
+    // best-effort, degrade to "no known models" instead.
+    let agent_models = args
+        .agent_models
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or(serde_json::Value::Null);
     let ctx = CompanionContext {
         parent_connection_id: args.parent_connection_id,
         socket_path: args.socket_path,
@@ -197,6 +217,7 @@ async fn main() -> ExitCode {
         features: CompanionFeatures::parse(args.features.as_deref()),
         custom_agents: parse_csv(args.custom_agents.as_deref()),
         disabled_agents: parse_csv(args.disabled_agents.as_deref()),
+        agent_models,
     };
 
     let stdin = tokio::io::stdin();

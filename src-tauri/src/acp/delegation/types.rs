@@ -71,6 +71,18 @@ pub struct DelegationRequest {
     pub requested_working_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_handle: Option<String>,
+    /// Per-call overrides the LLM passed on `delegate_to_agent`, replacing /
+    /// extending the per-agent `DelegationConfig::agent_defaults` entry for
+    /// this one spawn: `mode_id` replaces the default mode, and each
+    /// `config_values` key overrides the default's value for that key (keys
+    /// the defaults don't carry are added). Both reach the child through the
+    /// same channels the settings-based defaults use — `session/set_mode` and
+    /// `session/set_config_option` right after `SessionStarted`, before the
+    /// first prompt. `None` / empty → defaults unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_id: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_values: BTreeMap<String, String>,
 }
 
 /// Everything the broker needs to resume one interrupted delegation task.

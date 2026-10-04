@@ -309,3 +309,19 @@ tokio = { version = "1", features = ["test-util", "macros", "rt", "sync", "time"
 insta = { version = "1", features = ["json", "redactions"] }
 axum-test = { version = "17", features = ["ws"] }
 
+# Debug builds keep full debuginfo by default, which made `target/` balloon to
+# 6+ GB on this crate alone (106 MB object files). Line tables only keep
+# backtraces useful while shrinking the cache several-fold. Incremental is off
+# for the same reason: its cache re-read every build and filled the disk.
+# ponytail: flip incremental back on if link/build times measurably hurt.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+# Debug info of dependencies is the bulk of a test build (17 binaries, each
+# statically linking the whole app) and is never stepped into when debugging
+# codeg itself. The wildcard does not touch workspace members, so the own
+# crate keeps its line tables.
+[profile.dev.package."*"]
+debug = false
+

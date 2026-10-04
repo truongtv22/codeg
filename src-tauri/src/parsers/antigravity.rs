@@ -41,7 +41,9 @@
 //! arm is self-describing, while the enum has 118 values whose numbering is
 //! upstream's to change.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{DateTime, TimeZone, Utc};
 use prost::Message as _;
@@ -68,6 +70,13 @@ const TEXT_CAP: usize = 200_000;
 const SESSIONS_DIR_NAME: &str = "conversations";
 const ACP_SUBDIR: &str = "antigravity-acp";
 const METADATA_FILE_SUFFIX: &str = "meta";
+
+/// Every Antigravity surface keeps its own `conversations/` under the Gemini
+/// home, in freshness order (the ACP server first — it is the one codeg drives
+/// itself). The IDE and the IDE's embedded assistant even MIRROR sessions
+/// between `<home>/antigravity` and `<home>/antigravity-ide` under the same id,
+/// so the same conversation shows up in two roots.
+const SURFACE_DIR_NAMES: [&str; 3] = ["antigravity", "antigravity-ide", "antigravity-cli"];
 
 // ---------------------------------------------------------------------------
 // Path resolution (mirrors the server's own `acp_server/paths.py`)
@@ -142,6 +151,19 @@ pub(crate) fn resolve_antigravity_shared_config_dir() -> PathBuf {
 /// installed twice.
 pub(crate) fn resolve_antigravity_cli_dir() -> PathBuf {
     resolve_gemini_home().join("antigravity-cli")
+}
+
+/// Every `conversations/` directory the surfaces write, ACP store first. See
+/// [`SURFACE_DIR_NAMES`].
+fn resolve_all_sessions_dirs() -> Vec<PathBuf> {
+    let home = resolve_gemini_home();
+    let mut dirs = vec![resolve_antigravity_acp_dir().join(SESSIONS_DIR_NAME)];
+    dirs.extend(
+        SURFACE_DIR_NAMES
+            .iter()
+            .map(|name| home.join(name).join(SESSIONS_DIR_NAME)),
+    );
+    dirs
 }
 
 // ---------------------------------------------------------------------------
@@ -485,36 +507,72 @@ impl ErrorDetails {
 // ---------------------------------------------------------------------------
 
 pub struct AntigravityParser {
-    base_dir: PathBuf,
+    base_dirs: Vec<PathBuf>,
 }
 
 impl AntigravityParser {
     pub fn new() -> Self {
         Self {
-            base_dir: resolve_antigravity_sessions_dir(),
+            base_dirs: resolve_all_sessions_dirs(),
         }
     }
 
-    /// Construct a parser pointed at an explicit `conversations/` directory
+    /// Construct a parser pointed at explicit `conversations/` directories
     /// (test fixtures).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_base_dir(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            base_dirs: vec![base_dir],
+        }
     }
 
-    fn db_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir.join(format!("{conversation_id}.db"))
+    #[cfg(test)]
+    fn with_base_dirs(base_dirs: Vec<PathBuf>) -> Self {
+        Self { base_dirs }
+    }
+
+    fn db_path(&self, conversation_id: &str) -> Option<PathBuf> {
+        self.candidate_paths(conversation_id)
+            .into_iter()
+            .find(|path| path.is_file())
+    }
+
+    /// Every `<root>/<id>.db` that exists, freshest first — the IDE and the
+    /// IDE's embedded assistant mirror sessions between their two roots under
+    /// the same id, and the newer copy is the one that has the latest turns.
+    fn candidate_paths(&self, conversation_id: &str) -> Vec<PathBuf> {
+        let name = format!("{conversation_id}.db");
+        let mut paths: Vec<(SystemTime, PathBuf)> = self
+            .base_dirs
+            .iter()
+            .map(|dir| dir.join(&name))
+            .filter(|path| path.is_file())
+            .filter_map(|path| {
+                let modified = std::fs::metadata(&path).ok()?.modified().ok()?;
+                Some((modified, path))
+            })
+            .collect();
+        paths.sort_by(|a, b| b.0.cmp(&a.0));
+        paths.into_iter().map(|(_, path)| path).collect()
     }
 
     fn meta_path(&self, conversation_id: &str) -> PathBuf {
-        self.base_dir
-            .join(format!("{conversation_id}.{METADATA_FILE_SUFFIX}"))
+        // The `.meta` sidecar exists only in the ACP store's directory, and an
+        // id is unique to a root there, so one base dir suffices.
+        self.base_dirs
+            .first()
+            .map(|dir| dir.join(format!("{conversation_id}.{METADATA_FILE_SUFFIX}")))
+            .unwrap_or_default()
     }
 
     fn build(&self, conversation_id: &str) -> SessionParse {
-        let steps = read_steps(&self.db_path(conversation_id));
+        let Some(db_path) = self.db_path(conversation_id) else {
+            return SessionParse::default();
+        };
+        let steps = read_steps(&db_path);
         let mut parsed = project_steps(&steps);
-        parsed.cwd = read_sidecar_cwd(&self.meta_path(conversation_id));
+        parsed.cwd = read_sidecar_cwd(&self.meta_path(conversation_id))
+            .or_else(|| read_cwd_from_metadata_blob(&db_path));
         parsed
     }
 
@@ -546,27 +604,38 @@ impl Default for AntigravityParser {
 impl AgentParser for AntigravityParser {
     fn list_conversations(&self) -> Result<Vec<ConversationSummary>, ParseError> {
         let mut conversations = Vec::new();
-        let Ok(entries) = std::fs::read_dir(&self.base_dir) else {
-            return Ok(conversations);
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("db") {
-                continue;
-            }
-            let Some(conversation_id) = path.file_stem().map(|s| s.to_string_lossy().into_owned())
-            else {
+        // Ids already listed: the surfaces mirror the same session id between
+        // `<home>/antigravity` and `<home>/antigravity-ide`, so one physical id
+        // must produce exactly one summary. The fresher copy wins, which is
+        // what `candidate_paths` already orders for `get_conversation`.
+        let mut seen: HashSet<String> = HashSet::new();
+        for base_dir in &self.base_dirs {
+            let Ok(entries) = std::fs::read_dir(base_dir) else {
                 continue;
             };
-            let parsed = self.build(&conversation_id);
-            // A session whose DB is still the pre-created empty file (or which
-            // was cleared) has no content to show — matching the other parsers'
-            // "metadata-only is not listed" rule.
-            if parsed.turns.is_empty() {
-                continue;
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("db") {
+                    continue;
+                }
+                let Some(conversation_id) =
+                    path.file_stem().map(|s| s.to_string_lossy().into_owned())
+                else {
+                    continue;
+                };
+                if !seen.insert(conversation_id.clone()) {
+                    continue;
+                }
+                let parsed = self.build(&conversation_id);
+                // A session whose DB is still the pre-created empty file (or
+                // which was cleared) has no content to show — matching the
+                // other parsers' "metadata-only is not listed" rule.
+                if parsed.turns.is_empty() {
+                    continue;
+                }
+                conversations.push(self.summary_from(&conversation_id, &parsed));
             }
-            conversations.push(self.summary_from(&conversation_id, &parsed));
         }
 
         conversations.sort_by_key(|c| std::cmp::Reverse(c.started_at));
@@ -574,7 +643,11 @@ impl AgentParser for AntigravityParser {
     }
 
     fn get_conversation(&self, conversation_id: &str) -> Result<ConversationDetail, ParseError> {
-        if !self.db_path(conversation_id).is_file() {
+        if !self
+            .candidate_paths(conversation_id)
+            .first()
+            .is_some_and(|path| path.is_file())
+        {
             return Err(ParseError::ConversationNotFound(
                 conversation_id.to_string(),
             ));
@@ -691,6 +764,111 @@ fn read_sidecar_cwd(meta_path: &Path) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// The `cwd` a surface session (IDE / CLI / IDE-assistant) ran in, from the
+/// `trajectory_metadata_blob` table its stores write instead of the ACP
+/// server's `.meta` sidecar.
+///
+/// The blob is a `TrajectoryMetadata` protobuf whose top-level field 1 is the
+/// workspace record and whose field 1 again is the cwd as a `file://` URI. Two
+/// single-field decodes, no schema mirror — the same skip-by-wire-type posture
+/// the `Step` subset takes. `None` when the table is missing (the ACP store has
+/// no blob rows; its cwd comes from the sidecar) or carries no workspace.
+fn read_cwd_from_metadata_blob(db_path: &Path) -> Option<String> {
+    // The trajectory may already be open; a fresh read-only handle on a
+    // single-row read is cheaper than threading the connection through.
+    let conn = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let blob: Vec<u8> = conn
+        .query_row(
+            "SELECT data FROM trajectory_metadata_blob WHERE id = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+
+    let top_field_1 = blob_field(&blob, 1)?;
+    let cwd_field = blob_field(&top_field_1, 1)?;
+    let uri = std::str::from_utf8(&cwd_field).ok()?;
+    let cwd = uri.strip_prefix("file://")?;
+    let cwd = cwd.trim();
+    (!cwd.is_empty()).then(|| cwd.to_string())
+}
+
+/// The first occurrence of one length-delimited field inside a serialized
+/// protobuf message, as raw bytes.
+fn blob_field(blob: &[u8], want: u32) -> Option<Vec<u8>> {
+    let mut rest = blob;
+    while !rest.is_empty() {
+        // Varint key; every tag byte has its high bit set except the last.
+        let mut key: u64 = 0;
+        let mut shift = 0;
+        loop {
+            let (byte, tail) = rest.split_first()?;
+            key |= u64::from(byte & 0x7f) << shift;
+            rest = tail;
+            shift += 7;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            if shift > 63 {
+                return None;
+            }
+        }
+        let field = u32::try_from(key >> 3).ok()?;
+        match key & 0x7 {
+            // varint
+            0 => {
+                let mut shift = 0;
+                loop {
+                    let (&byte, tail) = rest.split_first()?;
+                    rest = tail;
+                    shift += 7;
+                    if byte & 0x80 == 0 {
+                        break;
+                    }
+                    if shift > 63 {
+                        return None;
+                    }
+                }
+            }
+            // length-delimited
+            2 => {
+                let mut len: u64 = 0;
+                let mut shift = 0;
+                loop {
+                    let (&byte, tail) = rest.split_first()?;
+                    rest = tail;
+                    len |= u64::from(byte & 0x7f) << shift;
+                    shift += 7;
+                    if byte & 0x80 == 0 {
+                        break;
+                    }
+                    if shift > 63 {
+                        return None;
+                    }
+                }
+                let len = usize::try_from(len).ok()?;
+                if rest.len() < len {
+                    return None;
+                }
+                let (value, tail) = rest.split_at(len);
+                rest = tail;
+                if field == want {
+                    return Some(value.to_vec());
+                }
+            }
+            // 32-bit / 64-bit fixed: skip by width.
+            5 => rest = rest.get(4..)?,
+            1 => rest = rest.get(8..)?,
+            _ => return None,
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2060,6 +2238,114 @@ mod tests {
         assert!(matches!(
             &blocks[1],
             ContentBlock::ToolResult { output_preview: Some(out), .. } if out.contains("a.txt")
+        ));
+    }
+
+    /// Single-byte-varint encoding of one length-delimited field — enough for
+    /// the small hand-built blobs these fixtures use.
+    fn encode_len_delimited(field: u32, payload: &[u8]) -> Vec<u8> {
+        let mut out = vec![((field << 3) | 2) as u8, payload.len() as u8];
+        out.extend_from_slice(payload);
+        out
+    }
+
+    #[test]
+    fn reads_a_surface_cwd_from_the_metadata_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        write_steps(
+            dir.path(),
+            "surf-1",
+            &[Step {
+                metadata: Some(StepMetadata {
+                    created_at: ts(1_700_000_000),
+                    ..Default::default()
+                }),
+                user_input: Some(UserInput {
+                    query: "hello from the ide".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }],
+        );
+        // The surface stores' workspace record: field 1 (workspace) → field 1
+        // (cwd as a `file://` URI).
+        let workspace = encode_len_delimited(1, b"file:///work/proj");
+        let conn = Connection::open(dir.path().join("surf-1.db")).unwrap();
+        conn.execute(
+            "CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+            rusqlite::params![encode_len_delimited(1, &workspace)],
+        )
+        .unwrap();
+
+        // No `.meta` sidecar in a surface store — the blob is the only cwd
+        // source, exactly the shape this reader exists for.
+        let parser = AntigravityParser::with_base_dir(dir.path().to_path_buf());
+        let listed = parser.list_conversations().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].folder_path.as_deref(), Some("/work/proj"));
+
+        // The wire walker itself: skips a varint field on the way, finds the
+        // wanted one, and bails with None on truncation instead of panicking.
+        let mut blob = vec![0x10, 0xac, 0x02]; // field 2, varint 300
+        blob.extend_from_slice(&encode_len_delimited(1, b"hi"));
+        assert_eq!(blob_field(&blob, 1).as_deref(), Some(&b"hi"[..]));
+        assert_eq!(blob_field(&blob, 2), None, "varints are skipped, not read");
+        assert_eq!(blob_field(&[0x0a, 0x05, 0x61], 1), None, "truncated length");
+    }
+
+    #[test]
+    fn mirrored_ids_list_once_and_the_fresher_copy_wins() {
+        // The IDE and the IDE's embedded assistant mirror sessions between
+        // their two roots under the same id.
+        let prompt = |text: &str| Step {
+            metadata: Some(StepMetadata {
+                created_at: ts(1_700_000_000),
+                ..Default::default()
+            }),
+            user_input: Some(UserInput {
+                query: text.into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ide_dir = tempfile::tempdir().unwrap();
+        let agy_dir = tempfile::tempdir().unwrap();
+        write_steps(ide_dir.path(), "mirror-1", &[prompt("older copy")]);
+        write_steps(agy_dir.path(), "mirror-1", &[prompt("newer copy")]);
+        write_steps(ide_dir.path(), "solo-1", &[prompt("only here")]);
+
+        // Deterministic mtimes: the freshest copy must win regardless of which
+        // root `read_dir` happens to surface first.
+        let set_mtime = |path: &Path, secs: u64| {
+            let f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            f.set_modified(
+                std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            )
+            .unwrap();
+        };
+        set_mtime(&ide_dir.path().join("mirror-1.db"), 1_700_000_000);
+        set_mtime(&agy_dir.path().join("mirror-1.db"), 1_700_060_000);
+        set_mtime(&ide_dir.path().join("solo-1.db"), 1_700_000_000);
+
+        let parser = AntigravityParser::with_base_dirs(vec![
+            ide_dir.path().to_path_buf(),
+            agy_dir.path().to_path_buf(),
+        ]);
+        let listed = parser.list_conversations().unwrap();
+        assert_eq!(listed.len(), 2, "the mirrored id lists once: {listed:?}");
+        let mirror = listed.iter().find(|c| c.id == "mirror-1").unwrap();
+        assert_eq!(mirror.title.as_deref(), Some("newer copy"));
+
+        // The detail view reads the same freshest copy.
+        let detail = parser.get_conversation("mirror-1").unwrap();
+        assert!(matches!(
+            &detail.turns[0].blocks[0],
+            ContentBlock::Text { text } if text == "newer copy"
         ));
     }
 }

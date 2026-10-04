@@ -3006,6 +3006,8 @@ mod tests {
             working_dir: None,
             requested_working_dir: None,
             external_handle: None,
+            mode_id: None,
+            config_values: Default::default(),
         }
     }
 

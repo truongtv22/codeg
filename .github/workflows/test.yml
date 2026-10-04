@@ -5,6 +5,10 @@ on:
     branches:
       - main
   pull_request:
+  # Manual dispatch lets feature branches run the full suite (cargo test +
+  # clippy + frontend) without opening a PR — the no-local-toolchain dev loop
+  # pushes here, then dispatches this workflow on the branch ref.
+  workflow_dispatch:
 
 env:
   RUST_BACKTRACE: short
