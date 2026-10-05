@@ -108,19 +108,26 @@ jobs:
 
       # ---- Tailscale (tùy chọn): join tailnet → SSH/UI đi P2P thẳng tới VM,
       # không qua relay bore (bore bị chặn ~0.25MB/s bởi đường truyền relay).
+      # KHÔNG dùng tailscale.com/install.sh trên runner macOS — nó chỉ mở trang
+      # App Store; CI phải dùng action chính thức (tải CLI từ pkgs.tailscale.com).
       # Không set secret TAILSCALE_AUTHKEY → skip sạch, bore vẫn dùng được.
-      - name: Join Tailscale (optional)
+      - name: Tailscale key?
+        id: tskey
         env:
           TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: echo "has=${TS_KEY:+yes}" >> "$GITHUB_OUTPUT"
+
+      - name: Join Tailscale
+        if: steps.tskey.outputs.has == 'yes'
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          hostname: codeg-vm
+
+      - name: Tailscale IP → connection.txt
+        if: steps.tskey.outputs.has == 'yes'
         run: |
-          if [ -z "${TS_KEY:-}" ]; then
-            echo "TAILSCALE_AUTHKEY chưa set — chỉ dùng bore.pub."
-            exit 0
-          fi
-          curl -fsSL https://tailscale.com/install.sh | sh
-          TS_CLI=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)
-          sudo "$TS_CLI" up --authkey="$TS_KEY" --hostname=codeg-vm
-          TS_IP=$("$TS_CLI" ip -4)
+          TS_IP=$(tailscale ip -4)
           {
             echo ""
             echo "Tailscale:   ssh runner@$TS_IP (port 22) — P2P, nhanh hơn bore"
