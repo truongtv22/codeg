@@ -23,12 +23,13 @@ REMOTE_DIR="${REMOTE_DEV_DIR:-work/codeg/codeg}"
 REMOTE_KEY="${REMOTE_DEV_KEY:-$([ -f "$HOME/.ssh/id_ed25519_github" ] && echo "$HOME/.ssh/id_ed25519_github")}"
 # IdentitiesOnly: agent không được đưa key nào trước key đúng — bore.pub ngắt
 # kết nối khi thử quá 6 key ("Too many authentication failures").
+# accept-new: VM mới = port + host key mới mỗi session (TOFU — auth thật là SSH key).
 SSH_OPTS=(-p "$REMOTE_PORT" ${REMOTE_KEY:+-i "$REMOTE_KEY"} \
-  -o IdentitiesOnly=yes \
+  -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new \
   -o ServerAliveInterval=15 -o ServerAliveCountMax=4 -o ExitOnForwardFailure=yes \
   "${REMOTE_USER}@${REMOTE_HOST}")
 # rsync/scp không nhận mảng SSH_OPTS — dựng chuỗi -e riêng, cùng key + IdentitiesOnly.
-RSYNC_SSH="ssh -p ${REMOTE_PORT} -o IdentitiesOnly=yes ${REMOTE_KEY:+-i ${REMOTE_KEY}}"
+RSYNC_SSH="ssh -p ${REMOTE_PORT} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new ${REMOTE_KEY:+-i ${REMOTE_KEY}}"
 # ssh non-interactive không thấy PATH của job steps: runner macos-latest cài node
 # qua homebrew (/opt/homebrew/bin), pnpm qua action-setup (~/setup-pnpm/...).
 # CI=true: pnpm không được hỏi xác nhận purge node_modules khi không có TTY.
@@ -68,8 +69,26 @@ case "$cmd" in
     APP_DIR="src-tauri/target/aarch64-apple-darwin/debug/bundle/macos"
     ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR}/${APP_DIR} && \
       ditto -c -k --keepParent codeg.app /tmp/codeg-devshell.zip"
-    scp ${REMOTE_KEY:+-i "$REMOTE_KEY"} -o IdentitiesOnly=yes -P "$REMOTE_PORT" \
-      "${REMOTE_USER}@${REMOTE_HOST}:/tmp/codeg-devshell.zip" /tmp/codeg-devshell.zip
+    # scp 1 stream qua bore relay bị chặn bởi cửa sổ TCP × RTT (~0.2MB/s đo
+    # thực — 87MB kéo ~9'). Chia chunk, tải 8 stream song song rồi gộp: tốc độ
+    # gần như ×8. ponytail: nếu relay giới hạn theo kết nối thì gộp lại thành
+    # 1 stream hoặc chuyển Tailscale P2P.
+    CHUNKS=8
+    SIZE=$(ssh "${SSH_OPTS[@]}" "stat -f%z /tmp/codeg-devshell.zip")
+    CSIZE=$(( (SIZE + CHUNKS - 1) / CHUNKS ))
+    ssh "${SSH_OPTS[@]}" "cd /tmp && split -b $CSIZE codeg-devshell.zip cds.zip.part-"
+    PARTS=$(ssh "${SSH_OPTS[@]}" "ls -1 /tmp/cds.zip.part-*")
+    for P in $PARTS; do
+      scp ${REMOTE_KEY:+-i "$REMOTE_KEY"} -o IdentitiesOnly=yes \
+        -o StrictHostKeyChecking=accept-new -P "$REMOTE_PORT" -q \
+        "${REMOTE_USER}@${REMOTE_HOST}:$P" "/tmp/$(basename "$P")" &
+    done
+    wait
+    cat /tmp/cds.zip.part-* > /tmp/codeg-devshell.zip
+    ACTUAL=$(stat -f%z /tmp/codeg-devshell.zip)
+    [ "$ACTUAL" = "$SIZE" ] || { echo "FATAL: pull hỏng ($ACTUAL ≠ $SIZE byte)" >&2; exit 1; }
+    rm -f /tmp/cds.zip.part-*
+    ssh "${SSH_OPTS[@]}" "rm -f /tmp/cds.zip.part-*"
     rm -rf /tmp/codeg-devshell.app
     # Zip bên VM đóng bằng --keepParent codeg.app → extract ra codeg.app, đổi
     # tên devshell để không đè Codeg.app thật của máy.

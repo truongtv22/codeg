@@ -1,0 +1,3 @@
+# Public keys được phép SSH vào VM remote-dev (runner đọc fallback từ file này
+# khi api.github.com/users/<actor>/keys bị rate limit). Public key — không nhạy cảm.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBvvAIx4ctb8VmQKzSvfjXtX2pIWXXKVF+AqU+oB8A6T truongtv22@gmail.com

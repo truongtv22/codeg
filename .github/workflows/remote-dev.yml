@@ -69,9 +69,16 @@ jobs:
 
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           # Chỉ key đã đăng ký trên tài khoản GitHub kích hoạt được phép kết nối.
-          curl -sf https://api.github.com/users/$ACTOR/keys | jq -r '.[].key' \
-            >> ~/.ssh/authorized_keys
+          # API công khai hay 403/rate-limit trên runner (IP dùng chung) — nếu rỗng
+          # thì fallback file public key commit sẵn trong repo, rồi VERIFY fail-fast.
+          curl -sf --retry 2 "https://api.github.com/users/$ACTOR/keys?per_page=100" \
+            | jq -r '.[].key' > ~/.ssh/authorized_keys || true
+          grep -q "ssh-" ~/.ssh/authorized_keys 2>/dev/null \
+            || cp "$GITHUB_WORKSPACE/scripts/remote-dev-authorized_keys" ~/.ssh/authorized_keys
+          grep -q "ssh-" ~/.ssh/authorized_keys \
+            || { echo "FATAL: authorized_keys rỗng — không ai SSH vào được"; exit 1; }
           chmod 600 ~/.ssh/authorized_keys
+          echo "authorized_keys: $(grep -c 'ssh-' ~/.ssh/authorized_keys) key"
 
           # bore có asset darwin-aarch64 chính thức (research-01, VERIFIED).
           BORE_VER=0.5.0
