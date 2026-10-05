@@ -47,7 +47,7 @@
           "additionalProperties": {
             "type": "string"
           },
-          "description": "Optional per-call session config overrides — e.g. {\"model\": \"<model-id>\"} to run THIS sub-agent on a specific model. Use the same keys and value ids the agent exposes in codeg's composer selectors; where codeg has observed an agent's model list, that list is appended below this paragraph — prefer one of those ids verbatim. Each key overrides the per-agent default from codeg's multi-agent settings for this call only; other defaults still apply. A key or value the agent does not offer is skipped (the agent default stays in force), so verify the sub-agent's output and re-delegate with a corrected value if the wrong model ran."
+          "description": "Optional per-call session config overrides — e.g. {\"model\": \"<model-id>\"} to run THIS sub-agent on a specific model. Use the same keys and value ids the agent exposes in codeg's composer selectors; where codeg has observed an agent's model list, that list is appended below this paragraph — prefer one of those ids verbatim. Each key overrides the per-agent default from codeg's multi-agent settings for this call only; other defaults still apply. A key or value the agent does not offer is skipped (the agent default stays in force), so verify the sub-agent's output and re-delegate with a corrected value if the wrong model ran. Pass the model choice through this field and keep the task text free of model directives — the sub-agent runs on the model configured here, not one it is told to switch to."
         }
       }
     }
