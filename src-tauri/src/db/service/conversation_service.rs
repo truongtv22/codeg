@@ -292,6 +292,32 @@ pub async fn seed_model_if_empty(
     Ok(res.rows_affected > 0)
 }
 
+/// The model a delegation child's conversation row recorded, for resume-time
+/// preferences. The row's `model` is seeded by the delegation lifecycle with
+/// the value the parent's per-call override resolved to, so it is the
+/// authoritative per-conversation truth. Reopening the child tab connects via
+/// `acp_connect`, which otherwise only sees the agent-scoped composer
+/// preference — still naming whatever the parent's UI last picked — and would
+/// show (and apply) the wrong model. Returns `None` for anything that is not
+/// a live delegate row with a stored model, so ordinary conversations keep
+/// their existing preference flow untouched.
+pub async fn find_delegate_model(
+    conn: &DatabaseConnection,
+    agent_type: AgentType,
+    external_id: &str,
+) -> Result<Option<String>, DbError> {
+    let row = conversation::Entity::find()
+        .filter(conversation::Column::AgentType.eq(agent_type.as_wire().into_owned()))
+        .filter(conversation::Column::ExternalId.eq(external_id))
+        .filter(conversation::Column::Kind.eq(ConversationKind::Delegate))
+        .filter(conversation::Column::DeletedAt.is_null())
+        .filter(conversation::Column::Model.is_not_null())
+        .filter(conversation::Column::Model.ne(""))
+        .one(conn)
+        .await?;
+    Ok(row.and_then(|r| r.model))
+}
+
 /// Lock a row's title WITHOUT rewriting it. For a conversation whose name was
 /// typed by the user somewhere else — a work task's title, an automation's name
 /// — the seed passed to [`create`] already IS the name; all that's missing is
@@ -1723,6 +1749,103 @@ mod tests {
                 .expect("seed"),
             "a deleted conversation is not something an open can resurrect a \
              column on"
+        );
+    }
+
+    #[tokio::test]
+    async fn find_delegate_model_reads_only_live_delegate_rows() {
+        let db = fresh_in_memory_db().await;
+        let folder_id = seed_folder(&db, "/tmp/find-delegate-model").await;
+
+        let parent = create(&db.conn, folder_id, AgentType::Codex, None, None)
+            .await
+            .expect("parent");
+        let child = create_with_delegation(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            None,
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent.id,
+                parent_tool_use_id: "tu-model".into(),
+                delegation_call_id: "call-model".into(),
+            }),
+        )
+        .await
+        .expect("child");
+        bind_external_id(&db.conn, child.id, "sess-child", &[])
+            .await
+            .expect("bind external id");
+        assert!(
+            seed_model_if_empty(&db.conn, child.id, "gemini-3.7-flash-high")
+                .await
+                .expect("seed")
+        );
+
+        assert_eq!(
+            find_delegate_model(&db.conn, AgentType::Codex, "sess-child")
+                .await
+                .expect("find"),
+            Some("gemini-3.7-flash-high".into()),
+            "the delegate row's stored model is the resume-time preference"
+        );
+
+        // Agent-scoped: the same external id under another agent matches nothing.
+        assert_eq!(
+            find_delegate_model(&db.conn, AgentType::ClaudeCode, "sess-child")
+                .await
+                .expect("find other agent"),
+            None
+        );
+
+        // A seeded model on an ORDINARY conversation must never surface here:
+        // it's the first model the session answered with and goes stale after
+        // manual switches, so it must not override the composer preference.
+        assert!(
+            seed_model_if_empty(&db.conn, parent.id, "gemini-3.8-flash-high")
+                .await
+                .expect("seed parent")
+        );
+        assert_eq!(
+            find_delegate_model(&db.conn, AgentType::Codex, "sess-parent-bound")
+                .await
+                .expect("find ordinary"),
+            None
+        );
+
+        // A delegate row with no stored model asks for no override.
+        let bare = create_with_delegation(
+            &db.conn,
+            folder_id,
+            AgentType::Codex,
+            None,
+            None,
+            Some(DelegationLink {
+                parent_conversation_id: parent.id,
+                parent_tool_use_id: "tu-bare".into(),
+                delegation_call_id: "call-bare".into(),
+            }),
+        )
+        .await
+        .expect("bare child");
+        bind_external_id(&db.conn, bare.id, "sess-bare", &[])
+            .await
+            .expect("bind bare");
+        assert_eq!(
+            find_delegate_model(&db.conn, AgentType::Codex, "sess-bare")
+                .await
+                .expect("find bare"),
+            None
+        );
+
+        // A soft-deleted delegate row no longer drives preferences.
+        soft_delete(&db.conn, child.id).await.expect("delete");
+        assert_eq!(
+            find_delegate_model(&db.conn, AgentType::Codex, "sess-child")
+                .await
+                .expect("find deleted"),
+            None
         );
     }
 

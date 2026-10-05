@@ -25,6 +25,7 @@ use crate::acp::types::{
 #[cfg(feature = "tauri-runtime")]
 use crate::acp::types::{ConnectionInfo, ForkResultInfo, PromptInputBlock};
 use crate::db::service::agent_setting_service;
+use crate::db::service::conversation_service;
 use crate::db::service::model_provider_service;
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
@@ -10892,6 +10893,45 @@ pub async fn acp_preflight(
 /// Diverging any of these from the others reintroduces the
 /// "[UI shows options] != [delegation gets options]" inconsistency that
 /// the multi-agent settings panel was designed to prevent.
+/// Re-apply a delegation child's own model on resume. The child's
+/// conversation row stores the model its per-call delegation override
+/// resolved to (`find_delegate_model`), but a reopened child tab connects
+/// through `acp_connect`, which only sees the agent-scoped composer
+/// preference — still naming the model the parent's UI last picked. When the
+/// connecting session is that delegate child, its row value wins.
+///
+/// Scoped to delegate rows so an ordinary conversation's stored model (the
+/// first model it ever answered with, stale after manual switches) never
+/// overrides the user's current composer choice. Delegation spawns bypass
+/// this entirely — the broker hands per-call values straight to
+/// `spawn_agent` — so those remain the strongest signal.
+///
+/// Best-effort: a lookup failure logs and keeps the caller's map as-is.
+pub(crate) async fn apply_delegate_model_preference(
+    db: &AppDatabase,
+    agent_type: AgentType,
+    session_id: Option<&str>,
+    preferred_config_values: &mut BTreeMap<String, String>,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+    let row_model = match conversation_service::find_delegate_model(&db.conn, agent_type, session_id)
+        .await
+    {
+        Ok(model) => model,
+        Err(e) => {
+            tracing::warn!(
+                "[acp] delegate model lookup for {agent_type} session {session_id} failed: {e}"
+            );
+            return;
+        }
+    };
+    if let Some(model) = row_model {
+        preferred_config_values.insert("model".to_string(), model);
+    }
+}
+
 pub(crate) async fn build_session_runtime_env(
     db: &AppDatabase,
     agent_type: AgentType,
@@ -11148,6 +11188,14 @@ pub async fn acp_connect(
     verify_agent_installed(agent_type).await?;
 
     let emitter = EventEmitter::Tauri(app_handle);
+    let mut preferred_config_values = preferred_config_values.unwrap_or_default();
+    apply_delegate_model_preference(
+        &db,
+        agent_type,
+        session_id.as_deref(),
+        &mut preferred_config_values,
+    )
+    .await;
     manager
         .spawn_agent(
             agent_type,
@@ -11157,7 +11205,7 @@ pub async fn acp_connect(
             window.label().to_string(),
             emitter,
             preferred_mode_id,
-            preferred_config_values.unwrap_or_default(),
+            preferred_config_values,
         )
         .await
 }

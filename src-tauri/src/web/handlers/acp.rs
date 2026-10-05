@@ -100,6 +100,14 @@ pub async fn acp_connect(
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
 
     let emitter = state.emitter.clone();
+    let mut preferred_config_values = params.preferred_config_values.unwrap_or_default();
+    acp_commands::apply_delegate_model_preference(
+        db,
+        params.agent_type,
+        params.session_id.as_deref(),
+        &mut preferred_config_values,
+    )
+    .await;
     let connection_id = manager
         .spawn_agent(
             params.agent_type,
@@ -109,7 +117,7 @@ pub async fn acp_connect(
             "web".to_string(),
             emitter,
             params.preferred_mode_id,
-            params.preferred_config_values.unwrap_or_default(),
+            preferred_config_values,
         )
         .await
         .map_err(|e| AppCommandError::task_execution_failed(e.to_string()))?;
