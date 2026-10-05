@@ -22,10 +22,13 @@ pub struct AppDatabase {
 }
 
 pub(crate) fn database_file_name() -> &'static str {
-    if cfg!(all(debug_assertions, feature = "tauri-runtime")) {
-        "codeg-dev.db"
-    } else {
+    // devshell-db: remote-dev devshell build shares the production db on
+    // purpose (user call). Plain debug desktop builds keep the isolated
+    // `codeg-dev.db` so dev migrations never touch release data.
+    if cfg!(feature = "devshell-db") || !cfg!(all(debug_assertions, feature = "tauri-runtime")) {
         "codeg.db"
+    } else {
+        "codeg-dev.db"
     }
 }
 

@@ -39,6 +39,9 @@ tauri-runtime = [
     "dep:gtk",
     "dep:javascriptcore-rs",
 ]
+# Devshell (remote-dev VM loop) shares the production `codeg.db` instead of the
+# isolated `codeg-dev.db` — see `db::database_file_name`.
+devshell-db = []
 # Exposes test scaffolding (`AppState::new_for_test`, `EventEmitter::test_web_only`,
 # `ConnectionManager::insert_test_connection`, parser `with_base_dir`, the
 # `db::test_helpers` module) for integration tests in `tests/*.rs`. Without

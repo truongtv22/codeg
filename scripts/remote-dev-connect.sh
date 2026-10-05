@@ -62,7 +62,8 @@ case "$cmd" in
     "$0" push
     ssh "${SSH_OPTS[@]}" "cd ~/${REMOTE_DIR} && ${REMOTE_ENV} && \
       pnpm tauri build --debug --target aarch64-apple-darwin \
-        --config src-tauri/tauri.devshell.conf.json --bundles app"
+        --config src-tauri/tauri.devshell.conf.json \
+        --features devshell-db --bundles app"
     "$0" pull
     ;;
   pull)

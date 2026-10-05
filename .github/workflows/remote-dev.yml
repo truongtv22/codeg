@@ -181,6 +181,7 @@ jobs:
         run: |
           pnpm tauri build --debug --target aarch64-apple-darwin \
             --config src-tauri/tauri.devshell.conf.json \
+            --features devshell-db \
             --bundles app
           APP=$(find src-tauri/target/aarch64-apple-darwin/debug/bundle/macos \
             -name "*.app" | head -1)
