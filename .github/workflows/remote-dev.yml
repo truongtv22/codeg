@@ -106,6 +106,29 @@ jobs:
           EOF
           cat /tmp/connection.txt
 
+      # ---- Tailscale (tùy chọn): join tailnet → SSH/UI đi P2P thẳng tới VM,
+      # không qua relay bore (bore bị chặn ~0.25MB/s bởi đường truyền relay).
+      # Không set secret TAILSCALE_AUTHKEY → skip sạch, bore vẫn dùng được.
+      - name: Join Tailscale (optional)
+        env:
+          TS_KEY: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          if [ -z "${TS_KEY:-}" ]; then
+            echo "TAILSCALE_AUTHKEY chưa set — chỉ dùng bore.pub."
+            exit 0
+          fi
+          curl -fsSL https://tailscale.com/install.sh | sh
+          TS_CLI=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)
+          sudo "$TS_CLI" up --authkey="$TS_KEY" --hostname=codeg-vm
+          TS_IP=$("$TS_CLI" ip -4)
+          {
+            echo ""
+            echo "Tailscale:   ssh runner@$TS_IP (port 22) — P2P, nhanh hơn bore"
+            echo "             export REMOTE_DEV_HOST=$TS_IP REMOTE_DEV_PORT=22 && scripts/remote-dev-connect.sh <cmd>"
+            echo "             Browser UI: http://$TS_IP:8787 (không cần tunnel)"
+          } >> /tmp/connection.txt
+          echo "Tailscale IP: $TS_IP"
+
       - name: Publish connection info
         uses: actions/upload-artifact@v4
         with:

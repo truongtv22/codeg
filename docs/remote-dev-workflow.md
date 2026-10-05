@@ -49,6 +49,25 @@ scripts/remote-dev-connect.sh build     # sửa backend: push + build devshell .
 Telegram hỏi "Tạo run mới?" (cửa sổ 20 phút). Duyệt → keeper/`gh workflow run` tạo
 session mới với cache ấm. Không duyệt → chuỗi dừng. `GATE_DECISION` in ra log run.
 
+## Tailscale (tùy chọn — nhanh hơn bore)
+
+Pull .app 87MB qua relay bore bị chặn bởi đường truyền relay (~0.25MB/s, ~6-9′).
+Join tailnet thì SSH/UI đi **P2P thẳng** tới VM:
+
+1. Tạo auth key tại `login.tailscale.com/admin/settings/keys` (Reusable + Ephemeral),
+   `gh secret set TAILSCALE_AUTHKEY --repo truongtv22/codeg`.
+2. Mac cài Tailscale, đăng nhập cùng tài khoản.
+3. Dispatch như thường — connection artifact in thêm IP `100.x.y.z`:
+
+```bash
+export REMOTE_DEV_HOST=100.x.y.z REMOTE_DEV_PORT=22
+scripts/remote-dev-connect.sh build   # pull qua P2P, ~30-60″ thay vì 6-9′
+```
+
+Browser có thể mở UI **trực tiếp** `http://100.x.y.z:8787` (không cần tunnel).
+Không set secret → workflow tự skip, bore vẫn là đường mặc định. SSH vẫn cần key
+đã đăng ký GitHub (authorized_keys) — tailnet chỉ thay đường đi.
+
 ## Bảo mật
 
 - Chỉ SSH key đăng ký trên tài khoản GitHub kích hoạt được kết nối (authorized_keys
