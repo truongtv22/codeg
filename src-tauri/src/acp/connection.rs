@@ -3947,9 +3947,9 @@ fn build_grok_set_model_params(
 async fn send_steer_request(
     cx: &ConnectionTo<Agent>,
     session_id: &SessionId,
-    blocks: &[PromptInputBlock],
+    prompt: &[ContentBlock],
 ) -> Result<SteerOutcome, AcpError> {
-    let params = build_steer_params(session_id.0.as_ref(), blocks);
+    let params = build_steer_params(session_id.0.as_ref(), prompt);
     let untyped_req = UntypedMessage::new("_session/steering", params).map_err(|e| {
         AcpError::protocol(format!("Failed to build steering request: {e}"))
     })?;
@@ -3961,19 +3961,23 @@ async fn send_steer_request(
     parse_steer_outcome(&raw)
 }
 
-/// Build the `_session/steering` params. The prompt carries the caller's
-/// blocks through [`map_prompt_blocks`] — the SAME conversion a
-/// `session/prompt` uses — so a steered draft's image attachments reach the
-/// adapter in the exact encoding its prompt path already accepts (a plain
-/// note is still a single text block, as before). `_meta.steering
+/// Build the `_session/steering` params. `prompt` arrives already
+/// agent-bound — the caller runs it through [`prepare_agent_bound_prompt`],
+/// the SAME conversion a `session/prompt` uses — so a steered draft's image
+/// attachments reach the adapter in the exact encoding its prompt path
+/// already accepts, and a steered `@Agent` mention carries the
+/// `delegate_to_agent` routing frame a fresh prompt would (steering is a
+/// delivery detail, not an exemption: a mid-turn "@Antigravity …" used to
+/// reach the LLM without the frame and could push it into an outside
+/// spawner). `_meta.steering
 /// .idleBehavior = "promptRequired"` opts into the turn-end-race contract: a
 /// turn that settled first yields `{outcome:"promptRequired"}` WITHOUT
 /// consuming the content, so the host resubmits it through a normal
 /// `session/prompt`.
-fn build_steer_params(session_id: &str, blocks: &[PromptInputBlock]) -> serde_json::Value {
+fn build_steer_params(session_id: &str, prompt: &[ContentBlock]) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
-        "prompt": map_prompt_blocks(blocks.to_vec()),
+        "prompt": prompt,
         "_meta": { "steering": { "idleBehavior": "promptRequired" } },
     })
 }
@@ -11602,7 +11606,22 @@ async fn run_conversation_loop(
                                     if let Some(inj) = delegation_injection {
                                         inj.questions.cancel_questions_by_parent(conn_id).await;
                                     }
-                                    let outcome = send_steer_request(&cx, &sid, &blocks).await;
+                                    // Steered messages get the same agent-bound
+                                    // conversion as a fresh `session/prompt`:
+                                    // the `@Agent` routing frame and Grok
+                                    // image normalization both apply here too.
+                                    // The caller's blocks stay pristine — the
+                                    // ledger below records THOSE, matching the
+                                    // transcript's user record.
+                                    let delegation_enabled =
+                                        state.read().await.delegation_enabled;
+                                    let prompt_blocks = prepare_agent_bound_prompt(
+                                        agent_type,
+                                        blocks.clone(),
+                                        delegation_enabled,
+                                    );
+                                    let outcome =
+                                        send_steer_request(&cx, &sid, &prompt_blocks).await;
                                     // A steered message still lands in the
                                     // agent's OWN transcript as a user record,
                                     // which `group_into_turns` reads as the
@@ -19700,18 +19719,21 @@ mod tests {
 
     #[test]
     fn build_steer_params_shape_carries_the_prompt_required_opt_in() {
-        let params = build_steer_params(
-            "sess-1",
-            &[crate::acp::types::PromptInputBlock::Text {
+        let prompt = prepare_agent_bound_prompt(
+            AgentType::ClaudeCode,
+            vec![crate::acp::types::PromptInputBlock::Text {
                 text: "use the staging db".into(),
             }],
+            false,
         );
+        let params = build_steer_params("sess-1", &prompt);
         assert_eq!(params["sessionId"], "sess-1");
         // EXACT equality, not field probes: routing a text-only note through
-        // `map_prompt_blocks` must stay byte-identical to the hand-built
-        // `[{type,text}]` this used to emit. A future schema bump that starts
-        // serializing `annotations`/`_meta` as null would change the wire for
-        // every existing steer, and a field probe would not notice.
+        // `prepare_agent_bound_prompt` must stay byte-identical to the
+        // hand-built `[{type,text}]` this used to emit. A future schema bump
+        // that starts serializing `annotations`/`_meta` as null would change
+        // the wire for every existing steer, and a field probe would not
+        // notice.
         assert_eq!(
             params["prompt"],
             serde_json::json!([{ "type": "text", "text": "use the staging db" }])
@@ -19724,12 +19746,13 @@ mod tests {
     #[test]
     fn build_steer_params_maps_image_blocks_like_a_prompt() {
         // A steered draft with an attachment must hit the wire in the SAME
-        // encoding `session/prompt` uses (`map_prompt_blocks`): the adapter's
-        // steering handler feeds the array through its normal prompt
-        // conversion, so ACP camelCase (`mimeType`) is what it reads.
-        let params = build_steer_params(
-            "sess-1",
-            &[
+        // encoding `session/prompt` uses (`prepare_agent_bound_prompt`, the
+        // caller's shared conversion): the adapter's steering handler feeds
+        // the array through its normal prompt conversion, so ACP camelCase
+        // (`mimeType`) is what it reads.
+        let prompt = prepare_agent_bound_prompt(
+            AgentType::ClaudeCode,
+            vec![
                 crate::acp::types::PromptInputBlock::Text {
                     text: "match this mock".into(),
                 },
@@ -19739,7 +19762,9 @@ mod tests {
                     uri: None,
                 },
             ],
+            false,
         );
+        let params = build_steer_params("sess-1", &prompt);
         assert_eq!(params["prompt"][0]["type"], "text");
         assert_eq!(params["prompt"][0]["text"], "match this mock");
         assert_eq!(params["prompt"][1]["type"], "image");
@@ -25447,23 +25472,26 @@ mod tests {
     #[test]
     fn resolve_rejected_model_picks_maps_natural_language_spellings() {
         let options = vec![antigravity_model_option()];
-        let preferred: BTreeMap<String, String> = [
-            ("a", "GEMINI-3.7-FLASH-HIGH"), // wrongly cased value id
-            ("b", "gemini-3.7-flash"),      // the effort suffix it cannot know
-            ("c", "Gemini 3.7 Flash"),      // display-name spelling
-            ("d", "gemini-3.8-flash-high"), // a value the agent offers
-            ("e", "gemini-9-ultra"),        // nothing matches
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect();
-        let resolved = resolve_rejected_model_picks(&options, &preferred);
-        assert_eq!(resolved["a"], "gemini-3.7-flash-high");
-        // Prefix hits take the FIRST advertised effort variant.
-        assert_eq!(resolved["b"], "gemini-3.7-flash-medium");
-        assert_eq!(resolved["c"], "gemini-3.7-flash-medium");
-        assert_eq!(resolved["d"], "gemini-3.8-flash-high");
-        assert_eq!(resolved["e"], "gemini-9-ultra");
+        // One call per pick: the map is keyed by config id and every pick
+        // targets the same "model" selector, so each case gets its own map.
+        let cases: &[(&str, &str)] = &[
+            // A wrongly cased value id resolves to its advertised spelling.
+            ("GEMINI-3.7-FLASH-HIGH", "gemini-3.7-flash-high"),
+            // The effort suffix the LLM cannot know: the FIRST advertised
+            // same-prefix variant wins.
+            ("gemini-3.7-flash", "gemini-3.7-flash-medium"),
+            ("Gemini 3.7 Flash", "gemini-3.7-flash-medium"),
+            // A value the agent still offers is never touched.
+            ("gemini-3.8-flash-high", "gemini-3.8-flash-high"),
+            // Nothing matches: the pick is left for the agent to reject.
+            ("gemini-9-ultra", "gemini-9-ultra"),
+        ];
+        for (requested, expected) in cases {
+            let preferred: BTreeMap<String, String> =
+                [("model".to_string(), (*requested).to_string())].into_iter().collect();
+            let resolved = resolve_rejected_model_picks(&options, &preferred);
+            assert_eq!(resolved["model"], *expected, "requested {requested:?}");
+        }
     }
 
     /// The `availableModes` claude-agent-acp 0.81.1 answered `session/new`
