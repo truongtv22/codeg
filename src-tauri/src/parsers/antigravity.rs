@@ -552,7 +552,7 @@ impl AntigravityParser {
                 Some((modified, path))
             })
             .collect();
-        paths.sort_by(|a, b| b.0.cmp(&a.0));
+        paths.sort_by_key(|a| std::cmp::Reverse(a.0));
         paths.into_iter().map(|(_, path)| path).collect()
     }
 
