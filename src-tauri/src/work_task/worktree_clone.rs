@@ -70,8 +70,11 @@ pub async fn try_add_cloned(
     }
 
     match populate_cloned(repo_path, worktree_path).await {
-        Ok(()) => {
-            tracing::info!("[worktree_clone] {worktree_path} populated via APFS clonefile");
+        Ok((cloned, copied)) => {
+            tracing::info!(
+                "[worktree_clone] {worktree_path} populated via APFS clonefile \
+                 ({cloned} cloned, {copied} copied)"
+            );
             Ok(true)
         }
         Err(reason) => {
@@ -84,7 +87,9 @@ pub async fn try_add_cloned(
 
 /// Populates the registered-but-empty checkout and reconciles it to the
 /// branch tip. Any failure leaves a recoverable state for the cleanup caller.
-async fn populate_cloned(repo_path: &str, worktree_path: &str) -> Result<(), String> {
+/// Returns `(cloned, copied)` — how many files went through `clonefile(2)`
+/// versus the per-file copy fallback.
+async fn populate_cloned(repo_path: &str, worktree_path: &str) -> Result<(usize, usize), String> {
     // Tracked entries at the worktree's HEAD, NUL-delimited so odd filenames
     // survive verbatim. HEAD already points at the new branch.
     let listing = run_git(worktree_path, &["ls-tree", "-r", "-z", "--full-tree", "HEAD"])
@@ -97,7 +102,7 @@ async fn populate_cloned(repo_path: &str, worktree_path: &str) -> Result<(), Str
 
     let repo = PathBuf::from(repo_path);
     let worktree = PathBuf::from(worktree_path);
-    tokio::task::spawn_blocking(move || clone_files(&repo, &worktree, &entries))
+    let (cloned, copied) = tokio::task::spawn_blocking(move || clone_files(&repo, &worktree, &entries))
         .await
         .map_err(|e| e.to_string())??;
 
@@ -135,14 +140,16 @@ async fn populate_cloned(repo_path: &str, worktree_path: &str) -> Result<(), Str
             String::from_utf8_lossy(&status.stdout)
         ));
     }
-    Ok(())
+    Ok((cloned, copied))
 }
 
 /// Mirrors the source checkout's tracked files into the worktree. Regular
 /// files go through `clonefile(2)`; a per-file failure degrades that one file
 /// to a plain copy. Files deleted in the source are skipped — `reset --hard`
 /// restores them from the object store.
-fn clone_files(repo: &Path, worktree: &Path, entries: &[TreeEntry]) -> Result<(), String> {
+fn clone_files(repo: &Path, worktree: &Path, entries: &[TreeEntry]) -> Result<(usize, usize), String> {
+    let mut cloned = 0usize;
+    let mut copied = 0usize;
     for entry in entries {
         let destination = worktree.join(&entry.path);
         if entry.mode == 0o120000 {
@@ -164,12 +171,15 @@ fn clone_files(repo: &Path, worktree: &Path, entries: &[TreeEntry]) -> Result<()
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
-        if clone_file(&source, &destination).is_err() {
+        if clone_file(&source, &destination).is_ok() {
+            cloned += 1;
+        } else {
             std::fs::copy(&source, &destination)
                 .map_err(|e| format!("copy {}: {e}", entry.path))?;
+            copied += 1;
         }
     }
-    Ok(())
+    Ok((cloned, copied))
 }
 
 /// `clonefile(2)`: makes `dst` share `src`'s extents until either side is
