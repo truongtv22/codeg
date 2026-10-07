@@ -2189,6 +2189,23 @@ pub async fn git_worktree_add(
         );
     }
 
+    // APFS clone-first: populate the new checkout with clonefile(2) clones of
+    // this checkout's tracked files instead of letting git copy every blob to
+    // disk, so parallel task worktrees share one checkout's extents (see
+    // work_task::worktree_clone). Anything the clone path cannot guarantee
+    // falls back to the plain `git worktree add` below.
+    #[cfg(target_os = "macos")]
+    if crate::work_task::worktree_clone::try_add_cloned(
+        &path,
+        &branch_name,
+        &worktree_path,
+        base.as_deref(),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
     // 执行 git worktree add -b <branch> <path> [<base>]
     // 显式 base（提交/引用）消除「读分支 → 建 worktree」间用户切分支的漂移窗口；
     // 省略时沿用 HEAD（既有调用方行为不变）。
