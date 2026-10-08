@@ -5663,6 +5663,11 @@ async fn run_connection(
     // keys upstream — see `spawn_agent_connection` for the rationale and
     // why we don't forward the full agent runtime_env here.
     let cwd = resolve_working_dir(working_dir.as_deref());
+    // A chat scratch cwd wiped from disk would make the agent reject
+    // session/new with "`cwd` does not exist on the machine running the agent"
+    // and drop the resumed context. Recreate it — a no-op unless the dir is
+    // missing AND shaped like a chat scratch dir (never a project cwd).
+    crate::commands::conversations::ensure_chat_scratch_cwd(&cwd);
     // Default terminals to the session working directory so an agent that calls
     // `terminal/create` without a `cwd` (e.g. CodeBuddy) runs in the folder the
     // conversation runs in rather than codeg's own process cwd.
