@@ -5435,6 +5435,9 @@ mod tests {
                 ("effort".into(), "medium".into()),
             ])
         );
+        // ponytail: drop before re-locking — tokio::sync::Mutex is
+        // non-reentrant; shadowing `args` would deadlock on the second lock.
+        drop(args);
 
         // And a request WITHOUT overrides still lands on the defaults
         // (no leakage of the previous call's overrides).
