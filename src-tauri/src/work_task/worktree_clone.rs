@@ -244,7 +244,7 @@ fn parse_ls_tree(raw: &[u8]) -> Vec<TreeEntry> {
             let path = String::from_utf8_lossy(&path[1..]).into_owned();
             let mode_str = std::str::from_utf8(&meta[..6]).ok()?;
             let mode = u32::from_str_radix(mode_str, 8).ok()?;
-            (mode != 0o160000).then(|| TreeEntry { mode, path })
+            (mode != 0o160000).then_some(TreeEntry { mode, path })
         })
         .collect()
 }
