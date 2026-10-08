@@ -7,7 +7,10 @@ use crate::app_error::{AppCommandError, AppErrorCode};
 use crate::commands::folders::{detect_conflicts, git_command_error};
 use crate::models::WorkTaskChangedFile;
 
-async fn run_git(path: &str, args: &[&str]) -> Result<std::process::Output, AppCommandError> {
+pub(crate) async fn run_git(
+    path: &str,
+    args: &[&str],
+) -> Result<std::process::Output, AppCommandError> {
     crate::process::tokio_command("git")
         .args(args)
         .current_dir(path)

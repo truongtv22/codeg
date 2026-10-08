@@ -5,6 +5,8 @@
 pub mod compact;
 pub mod engine;
 pub mod git;
+#[cfg(target_os = "macos")]
+pub mod worktree_clone;
 
 pub use engine::{
     build_task_engine, engine, run_task_engine, CleanupBlocked, EngineWorkTaskTools, TaskEngine,

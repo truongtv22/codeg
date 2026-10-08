@@ -2305,7 +2305,66 @@ pub fn create_chat_dir_core(data_dir: &std::path::Path) -> Result<String, AppCom
     let unique = uuid::Uuid::new_v4().simple().to_string();
     let dir = data_dir.join("chat-sessions").join(date).join(unique);
     std::fs::create_dir_all(&dir).map_err(AppCommandError::io)?;
+    write_chat_dir_db_marker(&dir);
     Ok(dir.to_string_lossy().to_string())
+}
+
+/// Marker file written inside every chat scratch dir naming the DB that owns it.
+/// The startup GC reclaims a dir only when its marker matches the running
+/// build's own [`crate::db::database_file_name`]: a debug desktop build shares
+/// the production `chat-sessions/` tree but backs it with `codeg-dev.db`, so a
+/// bare "not live in my DB" check once swept every *live* production chat dir
+/// as an orphan (conversation 676 lost its cwd this way — resume then failed
+/// with "`cwd` does not exist"). A dir with no marker (minted before this
+/// existed) is legacy: spared forever. That is a leak, but a GC must leak
+/// before it deletes something another DB may still own.
+const CHAT_DIR_DB_MARKER: &str = ".codeg-chat-db";
+
+fn write_chat_dir_db_marker(dir: &std::path::Path) {
+    let _ = std::fs::write(dir.join(CHAT_DIR_DB_MARKER), crate::db::database_file_name());
+}
+
+/// Does this chat scratch dir belong to the running build's DB? An unreadable
+/// or missing marker answers "no" — the GC may then never delete the dir.
+fn chat_dir_owned_by_this_db(dir: &std::path::Path) -> bool {
+    match std::fs::read_to_string(dir.join(CHAT_DIR_DB_MARKER)) {
+        Ok(owner) => owner == crate::db::database_file_name(),
+        Err(_) => false,
+    }
+}
+
+/// Recreate a chat scratch cwd that vanished from disk (wiped by a GC run from
+/// a build bound to another DB, or removed by hand). The agent's session
+/// history is keyed by this exact path but lives outside the dir, so an empty
+/// recreated dir lets `session/resume` restore the full transcript — only
+/// scratch files inside the dir are unrecoverable. The structural check on the
+/// `chat-sessions/<…>/<…>` tail keeps real project cwds out of scope: a silent
+/// recreate there would mask a moved or deleted repo.
+pub fn ensure_chat_scratch_cwd(cwd: &std::path::Path) {
+    if cwd.is_dir() {
+        return;
+    }
+    let under_chat_sessions = cwd
+        .parent()
+        .and_then(|date_bucket| date_bucket.parent())
+        .and_then(|root| root.file_name())
+        .is_some_and(|name| name == "chat-sessions");
+    if !under_chat_sessions {
+        return;
+    }
+    if let Err(err) = std::fs::create_dir_all(cwd) {
+        tracing::error!(
+            "[conversations] failed to recreate missing chat cwd {}: {err}",
+            cwd.display()
+        );
+        return;
+    }
+    // The dir is owned by this DB's folder row — claim it (see the marker doc).
+    write_chat_dir_db_marker(cwd);
+    tracing::info!(
+        "[conversations] recreated missing chat scratch cwd {}",
+        cwd.display()
+    );
 }
 
 /// How long a scratch dir must have sat untouched before the GC may reclaim it.
@@ -2418,6 +2477,12 @@ pub(crate) async fn gc_orphan_chat_dirs_core_with_threshold(
             if live.contains(&(date_key.clone(), uuid_key)) {
                 continue;
             }
+            // Owned by another DB sharing this tree (a debug build's
+            // `codeg-dev.db` while we run on `codeg.db`, or the reverse)? Its
+            // live-folder set is invisible to us — skip before even statting.
+            if !chat_dir_owned_by_this_db(&uuid_path) {
+                continue;
+            }
             // Old enough to reclaim? Unknown age (mtime unreadable / in the
             // future) → treat as fresh and spare it (a GC should leak before it
             // deletes something possibly in use). A zero threshold short-circuits
@@ -2471,6 +2536,9 @@ pub async fn create_chat_conversation_core(
     let path = match existing_dir {
         Some(dir) => {
             std::fs::create_dir_all(dir).map_err(AppCommandError::io)?;
+            // The dir is now bound to a folder row in THIS db — claim it so a
+            // later GC run from another build sharing the tree leaves it alone.
+            write_chat_dir_db_marker(std::path::Path::new(&dir));
             dir.to_string()
         }
         None => create_chat_dir_core(data_dir)?,
@@ -4002,6 +4070,59 @@ mod tests {
         assert!(
             std::path::Path::new(&fresh).is_dir(),
             "fresh dir retained (anti-race)"
+        );
+    }
+
+    #[tokio::test]
+    async fn gc_spares_dir_owned_by_another_db_and_unmarked_legacy_dir() {
+        let db = fresh_in_memory_db().await;
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let root = data_dir.path().join("chat-sessions").join("2026-10-05");
+        std::fs::create_dir_all(&root).expect("date bucket");
+
+        // A dir another build's DB owns (debug `codeg-dev.db` sharing the
+        // production tree while this GC runs on `codeg.db`, or vice versa),
+        // and a legacy dir minted before ownership markers existed.
+        let foreign = root.join("foreigndb0000000000000000000000");
+        std::fs::create_dir_all(&foreign).expect("foreign dir");
+        std::fs::write(foreign.join(CHAT_DIR_DB_MARKER), "other.db").expect("marker");
+        let legacy = root.join("legacymark0000000000000000000000");
+        std::fs::create_dir_all(&legacy).expect("legacy dir");
+
+        let removed = gc_orphan_chat_dirs_core_with_threshold(
+            &db.conn,
+            data_dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .expect("gc");
+
+        assert_eq!(removed, 0, "neither a foreign-owned nor an unmarked dir is reclaimed");
+        assert!(foreign.is_dir(), "dir owned by another DB spared");
+        assert!(legacy.is_dir(), "unmarked legacy dir spared");
+    }
+
+    #[test]
+    fn ensure_chat_scratch_cwd_recreates_only_chat_shaped_paths() {
+        let data_dir = tempfile::tempdir().expect("tempdir");
+        let missing_chat = data_dir
+            .path()
+            .join("chat-sessions")
+            .join("2026-10-05")
+            .join("450e579b1d57492b895bd1617259d64b");
+        ensure_chat_scratch_cwd(&missing_chat);
+        assert!(missing_chat.is_dir(), "missing chat scratch cwd recreated");
+        assert!(
+            missing_chat.join(CHAT_DIR_DB_MARKER).is_file(),
+            "recreated dir is claimed for this DB"
+        );
+
+        // A real project cwd must never be silently recreated.
+        let missing_project = data_dir.path().join("some-repo");
+        ensure_chat_scratch_cwd(&missing_project);
+        assert!(
+            !missing_project.exists(),
+            "a non-chat-shaped missing cwd is left alone"
         );
     }
 
