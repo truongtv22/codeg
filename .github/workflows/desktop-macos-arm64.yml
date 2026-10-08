@@ -1,0 +1,119 @@
+# Build the desktop app for Apple Silicon and attach it to a GitHub release —
+# the daily-driver bundle for a Mac without a local Rust toolchain.
+#
+# Release profile (not debug). No Apple code signing: this fork has no
+# Developer ID certificate, so Tauri ad-hoc signs — the client Mac needs a
+# one-time Gatekeeper bypass (`xattr -cr /Applications/Codeg.app` or
+# right-click > Open). Updater artifacts are off: they need the release
+# signing key that only release.yml has.
+#
+# Usage:
+#   gh workflow run desktop-macos-arm64.yml -R truongtv22/codeg
+# The release tag defaults to v<version> from src-tauri/tauri.conf.json;
+# pass the `tag` input to override. An existing release is reused and the
+# dmg is replaced (--clobber) so re-runs refresh the same release.
+
+name: Desktop build (macOS arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (default: v<version> from tauri.conf.json)"
+        type: string
+        required: false
+
+env:
+  RUST_BACKTRACE: short
+  HUSKY: 0
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-macos-arm64
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: tag
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          TAG="${{ inputs.tag }}"
+          [ -n "$TAG" ] || TAG="v$VERSION"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $TAG"
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      # Native build: the runner host triple IS aarch64-apple-darwin, so the
+      # host-fallback sidecar staging in beforeBuildCommand is correct here.
+      # cache-on-failure: a daily-driver workflow re-runs after flaky failures
+      # and should not pay the cold build twice.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          shared-key: desktop-darwin
+          cache-on-failure: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: "pnpm"
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build desktop bundle
+        run: >
+          pnpm tauri build --target aarch64-apple-darwin
+          --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Package
+        id: dmg
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          DMG="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/codeg_${VERSION}_aarch64.dmg"
+          [ -s "$DMG" ] || { echo "FATAL: $DMG not found"; ls src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/; exit 1; }
+          echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+          ls -la "$DMG"
+
+      - name: Upload to GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          DMG: ${{ steps.dmg.outputs.dmg }}
+        run: |
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --target "$GITHUB_SHA" \
+              --title "codeg $TAG" --generate-notes
+          gh release upload "$TAG" "$DMG" --clobber
+          echo "Attached to https://github.com/${GITHUB_REPOSITORY}/releases/tag/$TAG"
+
+      - name: Notify Telegram (desktop ready)
+        env:
+          TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "telegram not configured; skip"; exit 0; }
+          curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            -d chat_id="$CHAT" \
+            --data-urlencode "text=📦 ${GITHUB_REPOSITORY} — desktop macOS arm64 đã lên release $TAG
+          Tải: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/tag/$TAG" \
+            > /dev/null
+          echo "telegram notified"
