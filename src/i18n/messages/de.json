@@ -3153,6 +3153,7 @@
         "slashSearchPlaceholder": "Befehle suchen...",
         "slashSearchEmpty": "Keine passenden Befehle",
         "slashLoading": "Befehle werden geladen…",
+        "slashClearDescription": "Unterhaltung löschen und mit neuem Kontext beginnen",
         "experts": "Experten",
         "office": "Büroarbeit",
         "research": "Forschung",

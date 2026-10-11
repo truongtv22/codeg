@@ -3153,6 +3153,7 @@
         "slashSearchPlaceholder": "البحث عن الأوامر...",
         "slashSearchEmpty": "لا توجد أوامر مطابقة",
         "slashLoading": "جارٍ تحميل الأوامر…",
+        "slashClearDescription": "امسح المحادثة وابدأ سياقًا جديدًا",
         "experts": "الخبراء",
         "office": "الأعمال المكتبية",
         "research": "البحث العلمي",

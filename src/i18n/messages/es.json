@@ -3153,6 +3153,7 @@
         "slashSearchPlaceholder": "Buscar comandos...",
         "slashSearchEmpty": "Sin comandos coincidentes",
         "slashLoading": "Cargando comandos…",
+        "slashClearDescription": "Borrar la conversación y empezar un contexto nuevo",
         "experts": "Expertos",
         "office": "Ofimática",
         "research": "Investigación",

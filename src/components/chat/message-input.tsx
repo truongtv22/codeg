@@ -967,10 +967,26 @@ export function MessageInput({
     null
   )
   const [slashFilter, setSlashFilter] = useState("")
-  const slashCommands = useMemo(
-    () => availableCommands ?? [],
-    [availableCommands]
+  // claude-agent-acp strips `/clear` from `available_commands_update`
+  // (`UNSUPPORTED_COMMANDS` — its UX lives in the CLI's own terminal), yet the
+  // CLI itself executes it fine when typed. codeg's backend already tracks the
+  // transcript rollover a `/clear` produces (`PromptLedger`), so the entry is
+  // reinjected here verbatim — the menu row sends the same literal `/clear`
+  // token a typed one would.
+  const localSlashCommands = useMemo<AvailableCommandInfo[]>(
+    () =>
+      agentType === "claude_code"
+        ? [{ name: "clear", description: t("slashClearDescription") }]
+        : [],
+    [agentType, t]
   )
+  const slashCommands = useMemo(() => {
+    const advertised = availableCommands ?? []
+    const missing = localSlashCommands.filter(
+      (local) => !advertised.some((cmd) => cmd.name === local.name)
+    )
+    return [...advertised, ...missing]
+  }, [availableCommands, localSlashCommands])
   const filteredSlashCommands = useMemo(() => {
     if (!slashMenuOpen || slashCommands.length === 0) return []
     if (slashTriggerChar !== "/") return []

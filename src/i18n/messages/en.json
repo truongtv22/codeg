@@ -3155,6 +3155,7 @@
         "slashSearchPlaceholder": "Search commands...",
         "slashSearchEmpty": "No matching commands",
         "slashLoading": "Loading commands…",
+        "slashClearDescription": "Clear the conversation and start a fresh context",
         "experts": "Experts",
         "office": "Office Work",
         "research": "Scientific Research",
