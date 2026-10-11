@@ -39,6 +39,19 @@ describe("isCompactionEchoNotice", () => {
     ).toBe(true)
   })
 
+  it("recognizes claude's autocompact-thrashing warning", () => {
+    // Captured off a live codeg claude session: the CLI repeats this every
+    // turn while the thrash loop lasts.
+    expect(
+      isCompactionEchoNotice(
+        notice(
+          "warning",
+          "Claude Code: Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, 3 times in a row. A file being read or a tool output is likely too large for the context window. Try reading in smaller chunks, or use /clear to start fresh."
+        )
+      )
+    ).toBe(true)
+  })
+
   it("recognizes codex-acp's legacy 'Context compacted' notice", () => {
     expect(
       isCompactionEchoNotice(
@@ -70,6 +83,15 @@ describe("presentSessionNotice", () => {
       presentSessionNotice(
         "conn-1",
         notice("warning", "Heads up: multiple compactions hurt accuracy.")
+      )
+    ).toBeNull()
+    expect(
+      presentSessionNotice(
+        "conn-1",
+        notice(
+          "warning",
+          "Autocompact is thrashing: the context refilled to the limit. Try /clear to start fresh."
+        )
       )
     ).toBeNull()
   })

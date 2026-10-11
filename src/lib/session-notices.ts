@@ -42,6 +42,18 @@ export interface NoticeToast {
 const COMPACTION_ADVISORY = /\bmultiple compactions\b/i
 
 /**
+ * claude's autocompact-thrashing warning: the CLI can't compact fast enough
+ * ("Autocompact is thrashing… try /clear to start fresh") and repeats it every
+ * turn while the loop lasts, as a synthetic API-error frame forwarded as a
+ * warning notice. The `/clear` advice is TUI-directed (codeg has its own
+ * surfaces for context pressure: the usage ring and the compaction card), and
+ * the transcript parser already drops the record on reload — so toasting it
+ * live was the one asymmetry left. Same treatment as the compaction advisory
+ * above: dropped, and re-raised only when the wording changes.
+ */
+const AUTOCOMPACT_THRASHING = /\bAutocompact is thrashing\b/i
+
+/**
  * Whether a notice only restates a context compaction.
  *
  * Compaction already has its own surface: the transcript's compaction card
@@ -52,6 +64,8 @@ const COMPACTION_ADVISORY = /\bmultiple compactions\b/i
  *
  * - codex's advisory above, which carries nothing the card lacks except advice
  *   that repeats on every single compaction;
+ * - claude's autocompact-thrashing warning ([`AUTOCOMPACT_THRASHING`]), which
+ *   repeats every turn while the thrash loop lasts;
  * - codex-acp's legacy "Context compacted" notice, sent in place of the
  *   compaction frames to a client WITHOUT the capability. codeg always has it,
  *   so this is defensive — but if it ever arrives, the card (or its absence) is
@@ -60,6 +74,7 @@ const COMPACTION_ADVISORY = /\bmultiple compactions\b/i
 export function isCompactionEchoNotice(notice: SessionNotice): boolean {
   const text = `${notice.title}\n${notice.description ?? ""}`
   if (COMPACTION_ADVISORY.test(text)) return true
+  if (AUTOCOMPACT_THRASHING.test(text)) return true
   return (
     notice.severity === "info" &&
     notice.title.trim().toLowerCase() === "context compacted"
