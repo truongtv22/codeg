@@ -4058,6 +4058,18 @@ export async function listDirectoryEntries(
   return getTransport().call("list_directory_entries", { path })
 }
 
+/**
+ * Create the folder `name` directly inside `parentPath`, on the host that owns
+ * the filesystem the directory browser walks, and resolve to its path. One
+ * level only, and an existing entry of that name is an error, never reused.
+ */
+export async function createDirectory(
+  parentPath: string,
+  name: string
+): Promise<string> {
+  return getTransport().call("create_directory", { parentPath, name })
+}
+
 export async function listDirectoryWithFiles(
   path: string
 ): Promise<DirectoryItem[]> {
@@ -4896,9 +4908,9 @@ export async function terminalResize(
 
 /**
  * Recent output of an already-running terminal, for a viewer attaching to a
- * PTY it did not spawn (a canvas terminal card coming back from another
- * route). `alive: false` is the settled answer "nothing to attach to" — spawn
- * instead; it is never an error, so callers don't have to parse one.
+ * PTY it did not spawn (a canvas terminal card or restored panel tab).
+ * `alive: false, exists: true` carries retained final output; `exists: false`
+ * means no session is known. Older backends omit `exists`.
  *
  * Subscribe to `terminal://output/<id>` BEFORE calling this, and drop the
  * events whose `seq` is at or below the returned `seq` — that overlap is
@@ -4910,8 +4922,18 @@ export async function terminalSnapshot(
   return getTransport().call("terminal_snapshot", { terminalId })
 }
 
+/** Close a terminal: ends its process and forgets it, output included. */
 export async function terminalKill(terminalId: string): Promise<void> {
   return getTransport().call("terminal_kill", { terminalId })
+}
+
+/**
+ * End a terminal's process but keep the terminal: its final output stays on
+ * the backend for the tab still showing it, as after a natural exit, until
+ * `terminalKill` closes it. A server without `keepOutput` closes it instead.
+ */
+export async function terminalStop(terminalId: string): Promise<void> {
+  return getTransport().call("terminal_kill", { terminalId, keepOutput: true })
 }
 
 export async function terminalList(): Promise<TerminalInfo[]> {
@@ -5254,6 +5276,42 @@ export async function setCodegMcpToolGroup(
   return getTransport().call("set_codeg_mcp_tool_group", { key, enabled })
 }
 
+// ─── Generative UI (the ui-render skill) ────────────────────────────────
+// Enabled per agent like the bundled packs; link statuses reuse the Expert*
+// DTOs, with `expertId` carrying the skill's id.
+
+/** Mirror of Rust `GenerativeUiSkillInfo`. */
+export interface GenerativeUiSkillInfo {
+  /** The skill's name: its folder, and what the user types (`/ui-render`). */
+  id: string
+  /** The central skill store holds a skill of that name the user made, so
+   *  Codeg leaves the skill alone until it is renamed. */
+  conflict: boolean
+}
+
+export async function generativeUiSkillInfo(): Promise<GenerativeUiSkillInfo> {
+  return getTransport().call("generative_ui_skill_info")
+}
+
+/** One round-trip snapshot of the skill's link state for every agent. */
+export async function generativeUiListAllInstallStatuses(): Promise<
+  ExpertInstallStatus[]
+> {
+  return getTransport().call("generative_ui_list_all_install_statuses")
+}
+
+/** Apply a batch of enable/disable ops; returns one result per op. */
+export async function generativeUiApplyLinks(
+  ops: LinkOp[]
+): Promise<LinkOpResult[]> {
+  return getTransport().call("generative_ui_apply_links", { ops })
+}
+
+/** The skill's `SKILL.md`, for the matrix's preview drawer. */
+export async function generativeUiReadContent(): Promise<string> {
+  return getTransport().call("generative_ui_read_content")
+}
+
 // ─── Live feedback settings + submit ───────────────────────────────────
 
 /** Mirror of Rust `FeedbackSettings`. */
@@ -5390,7 +5448,15 @@ export async function setChatAuthoringSettings(
  * Does NOT touch chat-side `selectorsCache` or `localStorage` preferences. */
 export async function describeAgentOptions(
   agentType: AgentType,
-  workingDir?: string | null
+  workingDir?: string | null,
+  /** Config selections to apply on the probe session before reading the
+   *  snapshot. Callers pass the model: an agent that derives one option's
+   *  choices from another's value (opencode lists `effort` per model) then
+   *  answers for the user's selection instead of its own default model. An
+   *  applied option still reports the agent's own pick as its `current_value`
+   *  (what it runs when left unset), so a "Default" label keeps naming the
+   *  agent's model rather than the selection. */
+  configValues?: Record<string, string> | null
 ): Promise<AgentOptionsSnapshot> {
   // The backend probe has its own 60s timeout (`ConnectionManager::
   // probe_agent_options`) plus 500ms grace + poll/serialization
@@ -5403,6 +5469,7 @@ export async function describeAgentOptions(
     {
       agentType,
       workingDir: workingDir ?? null,
+      configValues: configValues ?? null,
     },
     { timeoutMs: 70_000 }
   )

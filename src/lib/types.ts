@@ -245,6 +245,14 @@ export type ContentBlock =
     }
   | { type: "thinking"; text: string }
   /**
+   * The turn FAILED, in the agent's own words. Mirror of Rust
+   * `ContentBlock::TurnError`: a parser puts it alone in a `system` turn
+   * closing the round, and the live stream does the same with the failure the
+   * adapter reported (`buildStreamingTurnsFromLiveMessage`). Drawn as one muted
+   * line, never as a reply.
+   */
+  | { type: "turn_error"; message: string }
+  /**
    * Frontend-only, LIVE-stream synthetic block. It is NEVER persisted and
    * NEVER emitted by the Rust JSONL parsers — the persisted plan path is a
    * `TodoWrite` tool_use block. It exists purely so a live plan can survive
@@ -4577,15 +4585,24 @@ export interface TerminalEvent {
    *  snapshot already contains (`seq <= snapshot.seq`). Absent on the exit
    *  event, which carries no output. */
   seq?: number
+  generation?: string
 }
 
-/** Recent output of a live terminal plus the cursor it was read at. `alive`
- *  false means no such terminal is running — the caller should spawn one
- *  rather than attach. */
+/** Recent output of a live or completed terminal.
+ *  When `alive` is false, `exists` distinguishes retained final output
+ *  from a missing session. */
 export interface TerminalSnapshot {
+  /** False after a backend restart or explicit close. Absent on old servers. */
+  exists?: boolean
+  /** Process exit code when a completed PTY reported one. */
+  exit_code?: number | null
+  generation?: string | null
   alive: boolean
   data: string
   seq: number
+  /** The PTY's size, which `data` was laid out for. Absent on old servers. */
+  cols?: number | null
+  rows?: number | null
 }
 
 export interface TokenBreakdown {
