@@ -32,6 +32,13 @@ pub const HELPER_JS: &str = include_str!("../../../src/browser-injected/helper.j
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub const CONSOLE_JS: &str = include_str!("../../../src/browser-injected/console.js");
 
+/// The page-world outer-size shim (`src/browser-injected/outer-size.js`).
+/// macOS only — the child-webview `outerWidth`/`outerHeight` = 0 it corrects
+/// is a WKWebView child-view behaviour; WebView2 and WebKitGTK report real
+/// window sizes. The file's header has the full story (Google Sheets blur).
+#[cfg(target_os = "macos")]
+pub const OUTER_SIZE_JS: &str = include_str!("../../../src/browser-injected/outer-size.js");
+
 /// The helper for an engine that reports the console to the host itself
 /// (WebView2, over CDP): told so before it runs, in its own world, so it does
 /// not also relay the page's lines and listen for its errors — the same line

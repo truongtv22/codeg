@@ -490,7 +490,10 @@ impl ChildHandle {
                 shim::install_world(
                     wv,
                     &[channel::PREFIX_SCRIPT, channel::HELPER_JS],
-                    &[channel::CONSOLE_JS],
+                    // Page world, document start: the console shim, and the
+                    // outer-size fix every zoom-compensating page needs
+                    // (`outerWidth` is 0 in a WKWebView child view).
+                    &[channel::CONSOLE_JS, channel::OUTER_SIZE_JS],
                     sink,
                 )
             })?
