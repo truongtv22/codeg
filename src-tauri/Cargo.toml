@@ -1,6 +1,6 @@
 [package]
 name = "codeg"
-version = "0.35.1"
+version = "0.35.2"
 description = "Agent Code Generation App"
 authors = ["feitao"]
 edition = "2021"
@@ -327,4 +327,18 @@ incremental = false
 # crate keeps its line tables.
 [profile.dev.package."*"]
 debug = false
+
+# Vendored fork of wry 0.55.1 with one change: the `window.ipc` bridge it
+# injects into every webview is `Object.freeze`d without `configurable`, so a
+# page that declares its own global `function ipc` — Google Docs/Sheets does,
+# for its cross-frame messaging — dies in JavaScriptCore with "Can't declare
+# global function 'ipc'", and Google serves its generic "trouble loading,
+# clear your cache" page. The built-in browser could not load any Google
+# editor. Upstream (wry `dev`, checked 2026-10-15) still injects it frozen,
+# so this stays until an upstream release makes it configurable — re-vendor
+# that version and delete this directory when it lands.
+# Only the three injection sites changed (`configurable: true` added):
+# src/wkwebview/mod.rs, src/webview2/mod.rs, src/webkitgtk/mod.rs.
+[patch.crates-io]
+wry = { path = "vendor/wry" }
 
