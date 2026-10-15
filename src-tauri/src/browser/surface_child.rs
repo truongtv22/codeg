@@ -533,17 +533,10 @@ impl ChildHandle {
                 shim::install_world(
                     wv,
                     &[channel::PREFIX_SCRIPT, channel::HELPER_JS],
-                    // Page world, document start: the console shim, and —
-                    // macOS only, where a WKWebView child view reports
-                    // `outerWidth` 0 and zoom-compensating pages blur.
-                    #[cfg(target_os = "macos")]
-                    {
-                        &[channel::CONSOLE_JS, channel::OUTER_SIZE_JS]
-                    }
-                    #[cfg(not(target_os = "macos"))]
-                    {
-                        &[channel::CONSOLE_JS]
-                    },
+                    // Page world, document start: the console shim everywhere,
+                    // plus the outer-size fix on macOS (a WKWebView child view
+                    // reports `outerWidth` 0, zoom-compensating pages blur).
+                    channel::PAGE_WORLD_SHIMS,
                     sink,
                 )
             })?

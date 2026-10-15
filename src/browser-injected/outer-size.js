@@ -22,11 +22,15 @@
   if (window.outerWidth !== 0) return
   try {
     Object.defineProperty(window, "outerWidth", {
-      get: function () { return window.innerWidth },
+      get: function () {
+        return window.innerWidth
+      },
       configurable: true,
     })
     Object.defineProperty(window, "outerHeight", {
-      get: function () { return window.innerHeight },
+      get: function () {
+        return window.innerHeight
+      },
       configurable: true,
     })
   } catch (_) {

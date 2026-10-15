@@ -39,6 +39,15 @@ pub const CONSOLE_JS: &str = include_str!("../../../src/browser-injected/console
 #[cfg(target_os = "macos")]
 pub const OUTER_SIZE_JS: &str = include_str!("../../../src/browser-injected/outer-size.js");
 
+/// The page-world scripts for the engines that report their console to nobody
+/// (see [`CONSOLE_JS`]): the console shim everywhere, plus the outer-size
+/// shim on macOS only. One constant so callers need no per-platform `#[cfg]`
+/// of their own.
+#[cfg(target_os = "macos")]
+pub const PAGE_WORLD_SHIMS: &[&str] = &[CONSOLE_JS, OUTER_SIZE_JS];
+#[cfg(not(target_os = "macos"))]
+pub const PAGE_WORLD_SHIMS: &[&str] = &[CONSOLE_JS];
+
 /// The helper for an engine that reports the console to the host itself
 /// (WebView2, over CDP): told so before it runs, in its own world, so it does
 /// not also relay the page's lines and listen for its errors — the same line
