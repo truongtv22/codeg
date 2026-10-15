@@ -109,6 +109,7 @@ jobs:
         env:
           TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "telegram not configured; skip"; exit 0; }
           curl -s -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \

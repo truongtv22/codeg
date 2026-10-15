@@ -6140,6 +6140,7 @@ mod tests {
             features: FEEDBACK_ONLY,
             custom_agents: Vec::new(),
             disabled_agents: Vec::new(),
+            agent_models: Value::Null,
         };
         let inflight = Arc::new(InflightCalls::new());
         let mut texts = Vec::new();
