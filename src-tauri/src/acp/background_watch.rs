@@ -315,18 +315,28 @@ impl PromptLedger {
     /// there the adapter writes the attachment's link first. Leaving such a
     /// prompt unrecorded classified its own turn as out-of-turn, so the overlay
     /// rendered the prompt and its reply a second time, under the live copy.
-    pub(crate) fn record_prompt_blocks(&self, blocks: &[crate::acp::types::PromptInputBlock]) {
+    ///
+    /// Returns whether the prompt is the CLI-local `/clear`. The connection
+    /// loop carries that onto the turn's exit: `/clear` answers with a new
+    /// transcript and NO reply, so its output-free `end_turn` must not be
+    /// diagnosed as an empty turn (see `finish_turn_reason` in
+    /// `acp::connection`).
+    pub(crate) fn record_prompt_blocks(
+        &self,
+        blocks: &[crate::acp::types::PromptInputBlock],
+    ) -> bool {
         let Some(fingerprint) = first_transcript_text(blocks) else {
             // Nothing the adapter writes as text (an image-only prompt): its
             // record carries no initiating text, so it cannot start a turn of
             // its own here either.
             tracing::debug!("[bg-watch] prompt without text — no fingerprint recorded");
-            return;
+            return false;
         };
         // `/clear` is a CLI-local command: the adapter forwards it like any
         // other prompt and Claude answers it by starting a new session on a
         // new transcript file. This is the only notice codeg gets.
-        if fingerprint == "/clear" || fingerprint.starts_with("/clear ") {
+        let is_clear = fingerprint == "/clear" || fingerprint.starts_with("/clear ");
+        if is_clear {
             *self.clear_sent_at.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((Instant::now(), std::time::SystemTime::now()));
         }
@@ -338,6 +348,7 @@ impl PromptLedger {
         while entries.len() > LEDGER_CAP {
             entries.pop_front();
         }
+        is_clear
     }
 
     /// Match `initiator_text` (the transcript turn's initiating user text)
@@ -4229,6 +4240,46 @@ mod tests {
         write_lines(&other_path, &refs);
         let (turns, ..) = unpack(tick_now(&mut unrecorded, &empty).expect("surfaces"));
         assert!(!turns.is_empty());
+    }
+
+    /// `record_prompt_blocks` reports whether the prompt is the CLI-local
+    /// `/clear`. The connection loop needs that verdict at turn end to skip
+    /// the empty-turn diagnosis — a clear answers with a transcript rollover
+    /// and NO reply — so it must come from the same recognition that stamps
+    /// the rollover expectation, and match it exactly.
+    #[test]
+    fn record_prompt_blocks_reports_clear() {
+        use crate::acp::types::PromptInputBlock;
+        let ledger = PromptLedger::shared();
+        let text = |t: &str| {
+            vec![PromptInputBlock::Text {
+                text: t.to_string(),
+            }]
+        };
+
+        assert!(ledger.record_prompt_blocks(&text("/clear")));
+        assert!(
+            ledger.record_prompt_blocks(&text("/clear now")),
+            "a clear with trailing input is still a clear"
+        );
+        assert!(
+            ledger.record_prompt_blocks(&text("  /clear  ")),
+            "the fingerprint is trimmed first"
+        );
+        assert!(
+            !ledger.record_prompt_blocks(&text("/clearly not a command")),
+            "prefix must end at a word boundary"
+        );
+        assert!(!ledger.record_prompt_blocks(&text("/compact")));
+        assert!(!ledger.record_prompt_blocks(&text("hello")));
+        assert!(
+            !ledger.record_prompt_blocks(&[PromptInputBlock::Image {
+                data: "iVBORw0KGgo=".into(),
+                mime_type: "image/png".into(),
+                uri: None,
+            }]),
+            "an image-only prompt has no text fingerprint to classify"
+        );
     }
 
     #[test]

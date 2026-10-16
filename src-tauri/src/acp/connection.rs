@@ -12618,8 +12618,11 @@ async fn run_conversation_loop(
                 // Fingerprint the outgoing prompt for the background watcher's
                 // foreground/out-of-turn classifier BEFORE the blocks are
                 // consumed: the transcript record this prompt becomes must
-                // classify as wire-rendered foreground, not overlay.
-                prompt_ledger.record_prompt_blocks(&blocks);
+                // classify as wire-rendered foreground, not overlay. The
+                // verdict also says whether this IS a `/clear` — the one turn
+                // whose output-free end is its expected shape (see the turn
+                // exit below). A steered `/clear` flips the same flag below.
+                let mut is_clear_turn = prompt_ledger.record_prompt_blocks(&blocks);
                 // Establishment is over the moment the user speaks: from here a
                 // config push is attributable to the prompt (`/model` typed in
                 // chat is one), so codeg stops arbitrating and the agent owns
@@ -13192,15 +13195,29 @@ async fn run_conversation_loop(
                             // turn) its diagnosis; every side effect stays
                             // below, in the order this exit needs it.
                             //
-                            // Exception: a response carrying a typed terminal
-                            // ERROR is a failed turn wearing the adapters'
-                            // disguised `end_turn` — its blank output is
-                            // explained by the AIR banner, so synthesizing an
-                            // "empty" toast on top would misdiagnose a dead
-                            // connection as "the agent produced nothing".
-                            let (reason_str, empty_report) = if terminal_failure
-                                .as_ref()
-                                .is_some_and(|record| record.severity == "error")
+                            // Two exemptions, each meaning "the blank output
+                            // is the expected shape, not a silent failure":
+                            //
+                            // - A `/clear` this turn sent. A CLI-local command
+                            //   the adapter forwards like any prompt: Claude
+                            //   answers it by rolling to a NEW transcript and
+                            //   producing no reply at all. Diagnosing that as
+                            //   an empty turn raised a spurious toast and
+                            //   flipped the conversation to Cancelled on every
+                            //   clear — while the background watcher was
+                            //   correctly adopting the rollover. The verdict
+                            //   rides in from `record_prompt_blocks`, the one
+                            //   place that already recognizes `/clear`.
+                            // - A response carrying a typed terminal ERROR is a
+                            //   failed turn wearing the adapters' disguised
+                            //   `end_turn` — its blank output is explained by
+                            //   the AIR banner, so synthesizing an "empty"
+                            //   toast on top would misdiagnose a dead
+                            //   connection as "the agent produced nothing".
+                            let (reason_str, empty_report) = if is_clear_turn
+                                || terminal_failure
+                                    .as_ref()
+                                    .is_some_and(|record| record.severity == "error")
                             {
                                 (raw_reason_str, None)
                             } else {
@@ -13493,7 +13510,12 @@ async fn run_conversation_loop(
                                     // — the overlay is the only place its work
                                     // can surface at all.
                                     if matches!(outcome, Ok(SteerOutcome::Injected)) {
-                                        prompt_ledger.record_prompt_blocks(&blocks);
+                                        // A steered `/clear` rolls the
+                                        // transcript too, and the running
+                                        // turn then ends without output —
+                                        // same exemption as a sent one.
+                                        is_clear_turn |=
+                                            prompt_ledger.record_prompt_blocks(&blocks);
                                         // A custom agent's history is codeg's
                                         // own transcript, and only codeg knows
                                         // the steer happened (see
@@ -36816,6 +36838,9 @@ mod tests {
         respond: Arc<tokio::sync::Notify>,
         /// How many question sweeps had run when each steer reached the agent.
         sweeps_at_steer: Arc<std::sync::Mutex<Vec<usize>>>,
+        /// Every event `until` has taken off the stream so far, in order —
+        /// what the turn exit actually emitted, not just what was waited for.
+        seen: Vec<AcpEvent>,
         client: tokio::task::JoinHandle<()>,
         agent: tokio::task::JoinHandle<()>,
     }
@@ -36941,6 +36966,7 @@ mod tests {
                 events,
                 respond,
                 sweeps_at_steer,
+                seen: Vec::new(),
                 client,
                 agent,
             }
@@ -37014,6 +37040,7 @@ mod tests {
                     .await
                     .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
                     .expect("event stream");
+                self.seen.push(envelope.payload.clone());
                 if matches(&envelope.payload) {
                     return;
                 }
@@ -37078,6 +37105,67 @@ mod tests {
         assert!(
             claude.sweeps_at_steer.lock().unwrap().is_empty(),
             "no steer was sent"
+        );
+        claude.shutdown().await;
+    }
+
+    /// `/clear` answers with a transcript rollover and no reply — the adapter
+    /// forwards it like any prompt, so the turn really does end with zero
+    /// output. The empty-turn diagnosis must not fire for it: session 727 got
+    /// a `turn_failed_empty` toast and a `Cancelled` row on every clear while
+    /// the rollover itself worked. A silent turn that is NOT a clear keeps
+    /// its diagnosis — the exemption is the command, not the silence.
+    #[tokio::test]
+    async fn a_clear_turn_ends_clean_while_a_silent_one_still_reports_empty() {
+        let mut claude = AskSweepLoop::start().await;
+
+        claude.open_turn("/clear").await;
+        claude.respond.notify_one();
+        claude
+            .until("the clear's turn end", |e| {
+                matches!(e, AcpEvent::TurnComplete { .. })
+            })
+            .await;
+        assert!(
+            !claude
+                .seen
+                .iter()
+                .any(|e| matches!(e, AcpEvent::Error { .. })),
+            "a clear turn must not raise an error: {:#?}",
+            claude.seen
+        );
+        let clear_reason = claude
+            .seen
+            .iter()
+            .find_map(|e| match e {
+                AcpEvent::TurnComplete { stop_reason, .. } => Some(stop_reason.clone()),
+                _ => None,
+            })
+            .expect("the clear's TurnComplete");
+        assert_eq!(
+            clear_reason, "end_turn",
+            "a clear is a clean turn, not a synthesized empty one"
+        );
+
+        // The negative control on the same connection: the same silent
+        // EndTurn WITHOUT `/clear` is still diagnosed and toasted.
+        claude.open_turn("hello").await;
+        claude.respond.notify_one();
+        claude
+            .until("the silent turn's end", |e| {
+                matches!(
+                    e,
+                    AcpEvent::TurnComplete { stop_reason, .. } if stop_reason == "empty"
+                )
+            })
+            .await;
+        assert!(
+            claude.seen.iter().any(|e| matches!(
+                e,
+                AcpEvent::Error { code: Some(code), .. } if code == "turn_failed_empty"
+            )),
+            "the plain silent turn keeps its empty-turn report: {:#?}",
+            claude.seen
         );
         claude.shutdown().await;
     }
