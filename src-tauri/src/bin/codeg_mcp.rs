@@ -218,6 +218,7 @@ async fn main() -> ExitCode {
         custom_agents: parse_csv(args.custom_agents.as_deref()),
         disabled_agents: parse_csv(args.disabled_agents.as_deref()),
         agent_models,
+        assistant_support: Default::default(),
     };
 
     let stdin = tokio::io::stdin();

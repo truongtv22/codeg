@@ -37,6 +37,7 @@
 //! task, never a second iteration on it (the tool takes no task text).
 
 pub mod agent_models;
+pub mod assistants;
 pub mod broker;
 pub mod companion;
 pub mod depth;
