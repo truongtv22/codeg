@@ -829,6 +829,11 @@ mod tests {
 
     #[test]
     fn supported_agents_are_nonempty_and_skill_capable() {
+        // This reads the WHOLE registry, not one uniquely-named id, so it must
+        // not overlap a test that hydrates: the assert re-calls
+        // `skill_storage_spec` per agent, and a parallel hydrate between the
+        // filter above and this assert would drop a pick from under it.
+        let _guard = crate::acp::custom_registry::hydrate_test_guard();
         let agents = supported_agents();
         assert!(!agents.is_empty());
         assert!(agents.iter().all(|a| skill_storage_spec(*a).is_some()));

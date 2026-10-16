@@ -40,12 +40,13 @@ pub const CONSOLE_JS: &str = include_str!("../../../src/browser-injected/console
 pub const OUTER_SIZE_JS: &str = include_str!("../../../src/browser-injected/outer-size.js");
 
 /// The page-world scripts for the engines that report their console to nobody
-/// (see [`CONSOLE_JS`]): the console shim everywhere, plus the outer-size
-/// shim on macOS only. One constant so callers need no per-platform `#[cfg]`
-/// of their own.
+/// (see [`CONSOLE_JS`]): the console shim on macOS/Linux, plus the outer-size
+/// shim on macOS only (a WKWebView child view reports `outerWidth` 0). One
+/// constant so callers need no per-platform `#[cfg]` of their own. Windows has
+/// no page-world shims — its engine reports the console itself.
 #[cfg(target_os = "macos")]
 pub const PAGE_WORLD_SHIMS: &[&str] = &[CONSOLE_JS, OUTER_SIZE_JS];
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
 pub const PAGE_WORLD_SHIMS: &[&str] = &[CONSOLE_JS];
 
 /// The helper for an engine that reports the console to the host itself
