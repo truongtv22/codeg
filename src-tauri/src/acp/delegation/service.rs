@@ -355,6 +355,28 @@ mod tests {
         ) -> crate::acp::chat_authoring::AuthoringOutcome {
             crate::acp::chat_authoring::AuthoringOutcome::default()
         }
+        async fn list_work_tasks(
+            &self,
+            _status: Option<String>,
+            _folder_id: Option<i32>,
+        ) -> crate::acp::chat_authoring::WorkTasksRead {
+            crate::acp::chat_authoring::WorkTasksRead {
+                tasks: Vec::new(),
+                note: None,
+            }
+        }
+        async fn list_automations(&self) -> crate::acp::chat_authoring::AutomationsRead {
+            crate::acp::chat_authoring::AutomationsRead {
+                automations: Vec::new(),
+                note: None,
+            }
+        }
+        async fn read_canvas(
+            &self,
+            _board_id: Option<i32>,
+        ) -> crate::acp::chat_authoring::CanvasReadOutcome {
+            crate::acp::chat_authoring::CanvasReadOutcome::Boards { boards: Vec::new() }
+        }
     }
 
     #[async_trait]

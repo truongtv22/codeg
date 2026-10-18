@@ -34,7 +34,8 @@ use crate::acp::delegation::transport::{
     BrokerComputerSnapshotRequest,
     BrokerComputerVerifyRequest, BrokerComputerWindowsRequest, BrokerCommitFeedbackRequest,
     BrokerFeedbackRequest, BrokerListAssistantsRequest, BrokerMessage, BrokerRequest,
-    BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest, BrokerResponse,
+    BrokerCanvasReadRequest, BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest,
+    BrokerListAutomationsRequest, BrokerListWorkTasksRequest, BrokerResponse,
     BrokerResumeTaskRequest, BrokerSessionRequest, BrokerStatusRequest,
     BrokerTaskCompleteRequest, BrokerTaskProgressRequest,
 };
@@ -47,7 +48,10 @@ use crate::acp::feedback::{PendingFeedback, SessionFeedbackAccess};
 use crate::acp::question::{QuestionOutcome, SessionQuestionAccess};
 #[cfg(unix)]
 use crate::acp::scratch_dir::{is_inside_sweep_scope, SUN_PATH_CAP};
-use crate::acp::chat_authoring::{AuthoringContext, AuthoringOutcome, ChatAuthoringAccess};
+use crate::acp::chat_authoring::{
+    AutomationsRead, AuthoringContext, AuthoringOutcome, CanvasReadOutcome, ChatAuthoringAccess,
+    WorkTasksRead,
+};
 use crate::acp::session_info::{SessionInfo, SessionInfoAccess};
 use crate::acp::work_task_tools::{TaskReportAck, WorkTaskToolAccess};
 use serde_json::Value;
@@ -583,6 +587,17 @@ impl DelegationListener {
             }
             BrokerMessage::CreateWorkTask(req) => {
                 authoring_response(self.process_create_work_task(req).await)?
+            }
+            BrokerMessage::ListWorkTasks(req) => {
+                // Bounded board reads, like SessionInfo: never long-poll, so no
+                // peer-close race and nothing to tear down on cancel.
+                board_read_response(&self.process_list_work_tasks(req).await)?
+            }
+            BrokerMessage::ListAutomations(req) => {
+                board_read_response(&self.process_list_automations(req).await)?
+            }
+            BrokerMessage::CanvasRead(req) => {
+                board_read_response(&self.process_canvas_read(req).await)?
             }
             BrokerMessage::BrowserTabs(req) => {
                 // A registry read. No peer-close race for the same reason as
@@ -1191,6 +1206,46 @@ impl DelegationListener {
         self.authoring.create_work_task(ctx, req.spec).await
     }
 
+    /// Validate the token and read the work-task board back. The reads need no
+    /// [`AuthoringContext`] — they are not scoped to the caller's conversation
+    /// — so a plain token gate suffices, as for [`Self::process_session_info`].
+    /// An invalid token gets the empty read with a note, the same shape a
+    /// disabled feature returns: a caller off the street learns nothing it
+    /// could not learn from a legitimately empty board.
+    async fn process_list_work_tasks(&self, req: BrokerListWorkTasksRequest) -> WorkTasksRead {
+        if self.tokens.lookup(&req.token).await.is_none() {
+            return WorkTasksRead {
+                tasks: Vec::new(),
+                note: Some("invalid token".to_string()),
+            };
+        }
+        self.authoring.list_work_tasks(req.status, req.folder_id).await
+    }
+
+    /// Validate the token and read the saved automations back.
+    async fn process_list_automations(
+        &self,
+        req: BrokerListAutomationsRequest,
+    ) -> AutomationsRead {
+        if self.tokens.lookup(&req.token).await.is_none() {
+            return AutomationsRead {
+                automations: Vec::new(),
+                note: Some("invalid token".to_string()),
+            };
+        }
+        self.authoring.list_automations().await
+    }
+
+    /// Validate the token and read the canvas (boards, or one board's nodes).
+    async fn process_canvas_read(&self, req: BrokerCanvasReadRequest) -> CanvasReadOutcome {
+        if self.tokens.lookup(&req.token).await.is_none() {
+            return CanvasReadOutcome::Unavailable {
+                note: "invalid token".to_string(),
+            };
+        }
+        self.authoring.read_canvas(req.board_id).await
+    }
+
     /// The roster for the companion's schema. A bad token gets an error
     /// payload rather than a dropped connection: the companion must always get
     /// an answer from a listener that understands the message.
@@ -1538,6 +1593,17 @@ fn task_ack_response(ack: TaskReportAck) -> std::io::Result<BrokerResponse> {
 fn authoring_response(outcome: AuthoringOutcome) -> std::io::Result<BrokerResponse> {
     Ok(BrokerResponse {
         outcome: serde_json::to_value(&outcome).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
+        })?,
+    })
+}
+
+/// Serialize a board-read outcome ([`WorkTasksRead`] / [`AutomationsRead`] /
+/// [`CanvasReadOutcome`]) for the `ListWorkTasks` / `ListAutomations` /
+/// `CanvasRead` arms — the companion renders it into the tool result.
+fn board_read_response<T: serde::Serialize>(outcome: &T) -> std::io::Result<BrokerResponse> {
+    Ok(BrokerResponse {
+        outcome: serde_json::to_value(outcome).map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, format!("encode: {e}"))
         })?,
     })
@@ -2026,6 +2092,25 @@ mod tests {
                 id: Some(9),
                 ..Default::default()
             }
+        }
+        async fn list_work_tasks(
+            &self,
+            _status: Option<String>,
+            _folder_id: Option<i32>,
+        ) -> WorkTasksRead {
+            WorkTasksRead {
+                tasks: Vec::new(),
+                note: None,
+            }
+        }
+        async fn list_automations(&self) -> AutomationsRead {
+            AutomationsRead {
+                automations: Vec::new(),
+                note: None,
+            }
+        }
+        async fn read_canvas(&self, _board_id: Option<i32>) -> CanvasReadOutcome {
+            CanvasReadOutcome::Boards { boards: Vec::new() }
         }
     }
 

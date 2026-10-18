@@ -1,10 +1,13 @@
-//! Chat-authoring domain types — backing the `create_automation` and
-//! `create_work_task` MCP tools.
+//! Chat-authoring domain types — backing the `create_automation` /
+//! `create_work_task` MCP tools and their read-back counterparts
+//! `list_automations` / `list_work_tasks` / `list_canvas_nodes`.
 //!
-//! These are the first codeg-mcp tools that *write* app state: an agent talking
-//! to the user in an ordinary chat can park recurring work as an automation, or
-//! queue a task on the work-task board, without the user leaving the
-//! conversation to fill in a form.
+//! The create tools are the first codeg-mcp tools that *write* app state: an
+//! agent talking to the user in an ordinary chat can park recurring work as an
+//! automation, or queue a task on the work-task board, without the user
+//! leaving the conversation to fill in a form. The list tools read that same
+//! state back so an agent can answer "what's on my board?" without the user
+//! switching away.
 //!
 //! This module holds the layer-shared pieces (mirroring
 //! [`crate::acp::session_info`]):
@@ -159,6 +162,115 @@ pub trait ChatAuthoringAccess: Send + Sync {
         ctx: AuthoringContext,
         spec: NewWorkTaskSpec,
     ) -> AuthoringOutcome;
+
+    /// Read the work-task board back (`list_work_tasks`). Same call-time flag
+    /// re-check as the writes: flipping the setting off stops reads from
+    /// sessions launched while it was on, too.
+    async fn list_work_tasks(
+        &self,
+        status: Option<String>,
+        folder_id: Option<i32>,
+    ) -> WorkTasksRead;
+
+    /// Read the saved automations back (`list_automations`). Same call-time
+    /// flag re-check as `create_automation`.
+    async fn list_automations(&self) -> AutomationsRead;
+
+    /// Read the canvas (`list_canvas_nodes`): the board list when `board_id`
+    /// is `None`, one board's full node set otherwise. Canvas is read-only app
+    /// state with no opt-in switch, so unlike the two above it has no feature
+    /// flag to re-check.
+    async fn read_canvas(&self, board_id: Option<i32>) -> CanvasReadOutcome;
+}
+
+// ===== Read-back outcomes (list_work_tasks / list_automations / list_canvas_nodes) =====
+//
+// Compact projections: the LLM wants status at a glance, not the whole stored
+// row. The prompt `config` blobs, merge machinery and preflight snapshots stay
+// app-side — every field here is one the board or automations page itself
+// leads with.
+
+/// One work-task board card as the LLM sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct BoardTaskRow {
+    pub id: i32,
+    pub folder_id: i32,
+    pub title: String,
+    /// Wire string of [`crate::db::entities::work_task::WorkTaskStatus`]
+    /// (`todo`, `running`, `review`, …).
+    pub status: String,
+    pub agent_type: Option<String>,
+    /// The conversation the task's current (or last) generation ran in.
+    pub conversation_id: Option<i32>,
+    /// On a settled task: `success` | `needs_review` | `blocked`.
+    pub verdict: Option<String>,
+    /// The executing agent's own final summary.
+    pub result_summary: Option<String>,
+    /// Why a task landed in `failed` (or was refused at launch).
+    pub failure_reason: Option<String>,
+    /// Latest `agent_progress` milestone of the current generation (live
+    /// tasks only; filled by `work_task_service::list`).
+    pub latest_progress: Option<String>,
+    /// Planned start of a `todo` task; `None` = unplanned.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// The `list_work_tasks` outcome.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkTasksRead {
+    pub tasks: Vec<BoardTaskRow>,
+    /// Why the list is empty or partial when it should not be (feature off,
+    /// DB error). `None` on a clean read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// One saved automation as the LLM sees it.
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationRow {
+    pub id: i32,
+    pub name: String,
+    pub enabled: bool,
+    /// `schedule` | `manual`.
+    pub trigger_kind: String,
+    /// Cron expression; `None` on a manual automation.
+    pub cron: Option<String>,
+    pub timezone: String,
+    pub next_run_at: Option<DateTime<Utc>>,
+    /// Agent the automation launches.
+    pub agent_type: String,
+    /// `launch_session` | `enqueue_task` (the config blob's `action`).
+    pub action: String,
+    pub last_run_at: Option<DateTime<Utc>>,
+    pub last_run_status: Option<String>,
+    /// Runs that failed since the user last looked at the automations page.
+    pub unseen_failures: i32,
+}
+
+/// The `list_automations` outcome.
+#[derive(Debug, Clone, Serialize)]
+pub struct AutomationsRead {
+    pub automations: Vec<AutomationRow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The `list_canvas_nodes` outcome: the board list when no `board_id` was
+/// given, one board's full node set when it was.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CanvasReadOutcome {
+    Boards { boards: Vec<crate::models::canvas::CanvasBoardSummary> },
+    Nodes {
+        board_id: i32,
+        revision: i64,
+        nodes: Vec<crate::models::canvas::CanvasNode>,
+    },
+    /// The named board does not exist (or the read failed) — the note says
+    /// which, so the LLM can fall back to listing boards.
+    Unavailable { note: String },
 }
 
 /// The two independently-toggled feature flags. Both default OFF: unlike the

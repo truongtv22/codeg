@@ -123,6 +123,28 @@ impl codeg_lib::acp::chat_authoring::ChatAuthoringAccess for NoAuthoring {
     ) -> codeg_lib::acp::chat_authoring::AuthoringOutcome {
         codeg_lib::acp::chat_authoring::AuthoringOutcome::rejected("work_task", "no authoring")
     }
+    async fn list_work_tasks(
+        &self,
+        _status: Option<String>,
+        _folder_id: Option<i32>,
+    ) -> codeg_lib::acp::chat_authoring::WorkTasksRead {
+        codeg_lib::acp::chat_authoring::WorkTasksRead {
+            tasks: Vec::new(),
+            note: None,
+        }
+    }
+    async fn list_automations(&self) -> codeg_lib::acp::chat_authoring::AutomationsRead {
+        codeg_lib::acp::chat_authoring::AutomationsRead {
+            automations: Vec::new(),
+            note: None,
+        }
+    }
+    async fn read_canvas(
+        &self,
+        _board_id: Option<i32>,
+    ) -> codeg_lib::acp::chat_authoring::CanvasReadOutcome {
+        codeg_lib::acp::chat_authoring::CanvasReadOutcome::Boards { boards: Vec::new() }
+    }
 }
 
 fn unique_pipe(tag: &str) -> String {

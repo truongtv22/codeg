@@ -244,6 +244,36 @@ pub struct BrokerCreateWorkTaskRequest {
     pub spec: NewWorkTaskSpec,
 }
 
+/// Read the work-task board back. Backs the `list_work_tasks` MCP tool; same
+/// token scoping as the create arm, with optional filters the companion has
+/// already validated (`status` is one of the board's wire strings, or absent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerListWorkTasksRequest {
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder_id: Option<i32>,
+}
+
+/// Read the saved automations back. Backs the `list_automations` MCP tool;
+/// same token scoping as the create arm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerListAutomationsRequest {
+    pub token: String,
+}
+
+/// Read the canvas: the board list when `board_id` is `None`, one board's full
+/// node set otherwise. Backs the `list_canvas_nodes` MCP tool; token-scoped
+/// like the session arm (board contents belong to the user, not to a
+/// conversation).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrokerCanvasReadRequest {
+    pub token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_id: Option<i32>,
+}
+
 /// List the built-in browser's tabs as an agent may see them. Backs the
 /// `browser_list_tabs` MCP tool. Authenticated by the per-launch `token`, and
 /// — like [`BrokerSessionRequest`] and for the same single-tenant reason — not
@@ -431,6 +461,9 @@ pub enum BrokerMessage {
     TaskComplete(BrokerTaskCompleteRequest),
     CreateAutomation(BrokerCreateAutomationRequest),
     CreateWorkTask(BrokerCreateWorkTaskRequest),
+    ListWorkTasks(BrokerListWorkTasksRequest),
+    ListAutomations(BrokerListAutomationsRequest),
+    CanvasRead(BrokerCanvasReadRequest),
     BrowserTabs(BrokerBrowserTabsRequest),
     BrowserSnapshot(BrokerBrowserSnapshotRequest),
     BrowserAct(BrokerBrowserActRequest),
@@ -663,6 +696,33 @@ pub async fn client_create_work_task_round_trip(
     req: &BrokerCreateWorkTaskRequest,
 ) -> io::Result<BrokerResponse> {
     message_round_trip(socket_path, &BrokerMessage::CreateWorkTask(req.clone())).await
+}
+
+/// Dispatch a `list_work_tasks` read and read back the serialized
+/// [`crate::acp::chat_authoring::WorkTasksRead`].
+pub async fn client_list_work_tasks_round_trip(
+    socket_path: &str,
+    req: &BrokerListWorkTasksRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ListWorkTasks(req.clone())).await
+}
+
+/// Dispatch a `list_automations` read and read back the serialized
+/// [`crate::acp::chat_authoring::AutomationsRead`].
+pub async fn client_list_automations_round_trip(
+    socket_path: &str,
+    req: &BrokerListAutomationsRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::ListAutomations(req.clone())).await
+}
+
+/// Dispatch a `list_canvas_nodes` read and read back the serialized
+/// [`crate::acp::chat_authoring::CanvasReadOutcome`].
+pub async fn client_canvas_read_round_trip(
+    socket_path: &str,
+    req: &BrokerCanvasReadRequest,
+) -> io::Result<BrokerResponse> {
+    message_round_trip(socket_path, &BrokerMessage::CanvasRead(req.clone())).await
 }
 
 /// Dispatch a `browser_list_tabs` request and read back the serialized

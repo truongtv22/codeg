@@ -127,7 +127,7 @@
   },
   {
     "name": "ask_user_question",
-    "description": "Ask the user one or more multiple-choice questions and BLOCK until they answer. The questions render as interactive cards above the user's input box; this call returns only once the user submits their choices (or dismisses the card). Use ONLY when you are blocked on a decision that is genuinely the user's to make — one you cannot resolve from the request, the code, or sensible defaults (e.g. which approach, which format, which library, which of several files). Do NOT use it to ask 'should I proceed?' or to confirm an obvious default, and do NOT use it for open-ended questions that aren't a small set of discrete choices. The user can always pick 'Other' and type a custom answer, so don't add your own 'Other' option. If you want to recommend a choice, put it first and append ' (Recommended)' to its label. Prefer ONE call with a few related questions over many sequential calls. Once the user has answered \u2014 including picking a recommended option or telling you to proceed \u2014 act on the answer immediately. Do NOT call this tool again to confirm execution or to ask whether you should proceed.",
+    "description": "Ask the user one or more multiple-choice questions and BLOCK until they answer. The questions render as interactive cards above the user's input box; this call returns only once the user submits their choices (or dismisses the card). Use ONLY when you are blocked on a decision that is genuinely the user's to make — one you cannot resolve from the request, the code, or sensible defaults (e.g. which approach, which format, which library, which of several files). Do NOT use it to ask 'should I proceed?' or to confirm an obvious default, and do NOT use it for open-ended questions that aren't a small set of discrete choices. The user can always pick 'Other' and type a custom answer, so don't add your own 'Other' option. If you want to recommend a choice, put it first and append ' (Recommended)' to its label. Prefer ONE call with a few related questions over many sequential calls. Once the user has answered — including picking a recommended option or telling you to proceed — act on the answer immediately. Do NOT call this tool again to confirm execution or to ask whether you should proceed.",
     "inputSchema": {
       "type": "object",
       "required": [
@@ -1399,6 +1399,56 @@
           "type": "string",
           "maxLength": 100000,
           "description": "The text to put on the clipboard."
+        }
+      }
+    }
+  },
+  {
+    "name": "list_work_tasks",
+    "description": "Read codeg's work-task board (the to-do cards create_work_task queues onto). Each card carries its id, title, status, the agent that runs it, the live progress line of the current generation and — on settled cards — the verdict and result summary. Use it when the user asks what is on their board, how a parked task is doing, or before queueing a card that may already exist. Filter by `status` and/or `folder_id`; omit both for the whole board. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": [
+            "todo",
+            "queued",
+            "preparing",
+            "running",
+            "awaiting_input",
+            "review",
+            "merging",
+            "done",
+            "failed",
+            "canceled"
+          ],
+          "description": "Only cards in this status. Omit for all."
+        },
+        "folder_id": {
+          "type": "integer",
+          "description": "Only cards of this codeg project folder. Omit for all folders."
+        }
+      }
+    }
+  },
+  {
+    "name": "list_automations",
+    "description": "Read the automations saved in codeg (recurring agent launches, including the ones create_automation saves). Each row carries its name, on/off switch, trigger (cron or manual), the agent it launches, whether it starts a session or enqueues a work task, next/last run and any unseen failures. Use it when the user asks what recurring work is set up or whether an automation has been failing. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    }
+  },
+  {
+    "name": "list_canvas_nodes",
+    "description": "Read codeg's infinite canvas. Without `board_id`: the list of boards (id, name, node counts) — call this first. With `board_id`: that board's full node set, each with its kind (folder, agent, conversation, file, terminal, note, region), title, content, position and the conversation it opens (as a codeg://session/<id> reference you can pass to get_session_info). Use it when the user asks what is laid out on their canvas or which conversations a board pins. Read-only.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "board_id": {
+          "type": "integer",
+          "description": "Read this board's nodes (an id from the boards list). Omit to list boards."
         }
       }
     }

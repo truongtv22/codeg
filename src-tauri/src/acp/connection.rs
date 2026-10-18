@@ -6627,6 +6627,11 @@ struct CompanionFeatureFlags {
     automations: bool,
     /// `create_work_task`, gated by the chat-authoring setting.
     taskboard: bool,
+    /// `list_canvas_nodes` — a read of canvas app state with no opt-in switch,
+    /// on whenever a companion is injected at all (same posture as the
+    /// read-only session tool's group, which has its own setting; canvas has
+    /// none to gate by).
+    canvas: bool,
     /// `browser_list_tabs` / `browser_snapshot`, gated by the browser-tools
     /// setting AND by there being a built-in browser at all — the tabs are
     /// native webviews this process owns, which server mode has none of.
@@ -6673,6 +6678,9 @@ fn companion_features_arg(flags: CompanionFeatureFlags) -> Option<String> {
     }
     if flags.taskboard {
         features.push("taskboard");
+    }
+    if flags.canvas {
+        features.push("canvas");
     }
     if flags.browser {
         features.push("browser");
@@ -6789,6 +6797,10 @@ where
         tasks: tasks_enabled,
         automations: authoring.automations_enabled,
         taskboard: authoring.work_tasks_enabled,
+        // Read-only board/canvas state, no opt-in switch to gate by — always
+        // offered. The DB-side reads re-check the chat-authoring switches for
+        // the two authoring-gated groups at call time.
+        canvas: true,
         // `cfg!` rather than a runtime probe: a browser tab is a native
         // webview owned by this process, and the server binary has no such
         // thing — what a web user sees in a "browser tab" is an iframe their
@@ -35509,6 +35521,7 @@ mod tests {
                 tasks: true,
                 automations: true,
                 taskboard: true,
+                canvas: true,
                 browser: true,
                 browser_eval: true,
                 computer: true,
@@ -35516,8 +35529,8 @@ mod tests {
                 computer_clipboard: true,
             }),
             Some(
-                "delegation,feedback,ask,sessions,tasks,automations,taskboard,browser,browser_eval,\
-                 computer,computer_launch,computer_clipboard"
+                "delegation,feedback,ask,sessions,tasks,automations,taskboard,canvas,browser,\
+                 browser_eval,computer,computer_launch,computer_clipboard"
                     .to_string()
             )
         );

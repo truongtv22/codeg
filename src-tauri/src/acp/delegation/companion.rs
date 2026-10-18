@@ -54,7 +54,9 @@ use crate::acp::delegation::transport::{
     client_computer_launch_round_trip, client_computer_snapshot_round_trip,
     client_computer_verify_round_trip, client_computer_windows_round_trip,
     client_create_automation_round_trip, client_create_work_task_round_trip,
-    client_feedback_round_trip, client_list_assistants_round_trip, client_ping,
+    client_canvas_read_round_trip, client_feedback_round_trip,
+    client_list_assistants_round_trip, client_list_automations_round_trip,
+    client_list_work_tasks_round_trip, client_ping,
     client_resume_task_round_trip, client_round_trip,
     client_session_round_trip, client_status_round_trip, client_task_complete_round_trip,
     client_task_progress_round_trip, BrokerAskRequest, BrokerBrowserActRequest,
@@ -64,7 +66,8 @@ use crate::acp::delegation::transport::{
     BrokerComputerActRequest, BrokerComputerAppsRequest, BrokerComputerCaptureRequest,
     BrokerComputerClipboardRequest, BrokerComputerLaunchRequest, BrokerComputerSnapshotRequest,
     BrokerComputerVerifyRequest, BrokerComputerWindowsRequest, BrokerCreateAutomationRequest,
-    BrokerCreateWorkTaskRequest, BrokerFeedbackRequest, BrokerListAssistantsRequest,
+    BrokerCreateWorkTaskRequest, BrokerCanvasReadRequest, BrokerFeedbackRequest,
+    BrokerListAssistantsRequest, BrokerListAutomationsRequest, BrokerListWorkTasksRequest,
     BrokerRequest, BrokerResponse,
     BrokerResumeTaskRequest, BrokerSessionRequest, BrokerStatusRequest,
     BrokerTaskCompleteRequest, BrokerTaskProgressRequest,
@@ -168,6 +171,11 @@ pub struct CompanionFeatures {
     pub automations: bool,
     /// `create_work_task` — queue a card on the work-task board from chat.
     pub taskboard: bool,
+    /// `list_canvas_nodes` — read the canvas boards / one board's node set.
+    /// Read-only app state with no opt-in switch, so this group is always on
+    /// when a companion is injected at all (the parent emits `canvas`
+    /// unconditionally).
+    pub canvas: bool,
     /// The built-in browser's agent surface: `browser_list_tabs` /
     /// `browser_snapshot` / `browser_console_messages` / `browser_screenshot`,
     /// the five action tools (`browser_click`, `browser_hover`,
@@ -225,6 +233,7 @@ impl CompanionFeatures {
                 tasks: false,
                 automations: false,
                 taskboard: false,
+                canvas: false,
                 browser: false,
                 browser_eval: false,
                 computer: false,
@@ -240,6 +249,7 @@ impl CompanionFeatures {
             tasks: false,
             automations: false,
             taskboard: false,
+            canvas: false,
             browser: false,
             browser_eval: false,
             computer: false,
@@ -255,6 +265,7 @@ impl CompanionFeatures {
                 "tasks" => f.tasks = true,
                 "automations" => f.automations = true,
                 "taskboard" => f.taskboard = true,
+                "canvas" => f.canvas = true,
                 "browser" => f.browser = true,
                 "browser_eval" => f.browser_eval = true,
                 "computer" => f.computer = true,
@@ -275,6 +286,9 @@ impl CompanionFeatures {
             "task_progress" | "task_complete" => self.tasks,
             "create_automation" => self.automations,
             "create_work_task" => self.taskboard,
+            "list_work_tasks" => self.taskboard,
+            "list_automations" => self.automations,
+            "list_canvas_nodes" => self.canvas,
             "browser_list_tabs" | "browser_snapshot" | "browser_console_messages"
             | "browser_screenshot" | "browser_click" | "browser_hover" | "browser_type"
             | "browser_press_key" | "browser_select_option" | "browser_open_tab"
@@ -1459,6 +1473,59 @@ async fn build_tools_call_spawn(
                 Box::pin(async move { client_create_work_task_round_trip(&socket, &req).await });
             register_and_spawn(inflight, id, None, round_trip, render_authoring_result).await
         }
+        "list_work_tasks" => {
+            let status = arguments
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let folder_id = parse_optional_id(&arguments, "folder_id");
+            if arguments.get("folder_id").is_some() && folder_id.is_none() {
+                return LineAction::Respond(err(
+                    id,
+                    -32602,
+                    "list_work_tasks `folder_id` must be an integer \
+                     (a codeg project folder id)",
+                ));
+            }
+            let req = BrokerListWorkTasksRequest {
+                token: ctx.token.clone(),
+                status,
+                folder_id,
+            };
+            let round_trip = Box::pin(async move {
+                client_list_work_tasks_round_trip(&socket, &req).await
+            });
+            register_and_spawn(inflight, id, None, round_trip, render_work_tasks_result).await
+        }
+        "list_automations" => {
+            let req = BrokerListAutomationsRequest {
+                token: ctx.token.clone(),
+            };
+            let round_trip = Box::pin(async move {
+                client_list_automations_round_trip(&socket, &req).await
+            });
+            register_and_spawn(inflight, id, None, round_trip, render_automations_result).await
+        }
+        "list_canvas_nodes" => {
+            let board_id = parse_optional_id(&arguments, "board_id");
+            if arguments.get("board_id").is_some() && board_id.is_none() {
+                return LineAction::Respond(err(
+                    id,
+                    -32602,
+                    "list_canvas_nodes `board_id` must be an integer \
+                     (a board id from a previous call's boards list)",
+                ));
+            }
+            let req = BrokerCanvasReadRequest {
+                token: ctx.token.clone(),
+                board_id,
+            };
+            let round_trip =
+                Box::pin(async move { client_canvas_read_round_trip(&socket, &req).await });
+            register_and_spawn(inflight, id, None, round_trip, render_canvas_result).await
+        }
         other => LineAction::Respond(err(id, -32602, format!("unknown tool: {other}"))),
     }
 }
@@ -2118,7 +2185,12 @@ fn truncate_chars(s: &str, cap: usize) -> String {
 /// hosts stringify integer args. `None` for missing / non-integer / out-of-range,
 /// which the dispatcher maps to a synchronous `-32602` the LLM can fix.
 fn parse_session_id(arguments: &Value) -> Option<i32> {
-    let v = arguments.get("session_id")?;
+    parse_id_value(arguments.get("session_id")?)
+}
+
+/// One integer id in the shapes hosts emit it: JSON number, whole float, or
+/// numeric string (some hosts stringify integer args).
+fn parse_id_value(v: &Value) -> Option<i32> {
     if let Some(n) = v.as_i64() {
         return i32::try_from(n).ok();
     }
@@ -2131,6 +2203,14 @@ fn parse_session_id(arguments: &Value) -> Option<i32> {
         return s.trim().parse::<i32>().ok();
     }
     None
+}
+
+/// Parse an optional integer tool argument (`folder_id`, `board_id`), same
+/// shapes as `parse_session_id`. `None` means "absent" OR "unparseable" — the
+/// caller distinguishes by re-checking the key when it needs to reject the
+/// latter.
+fn parse_optional_id(arguments: &Value, key: &str) -> Option<i32> {
+    arguments.get(key).and_then(parse_id_value)
 }
 
 /// Parse the optional `max_messages` tuning arg robustly: a JSON number (integer
@@ -2185,6 +2265,205 @@ pub fn render_session_result(outcome: &Value) -> Value {
         "isError": false,
         "structuredContent": outcome.clone(),
     })
+}
+
+/// Shared body of the three board-read renderers: the full outcome rides in
+/// `structuredContent`, and a `note` (feature off, DB error, bad board) is
+/// surfaced as readable text with `isError: false` — the LLM reads it and
+/// proceeds, never a tool error.
+fn read_result(text: String, outcome: &Value) -> Value {
+    json!({
+        "content": [{ "type": "text", "text": text }],
+        "isError": false,
+        "structuredContent": outcome.clone(),
+    })
+}
+
+/// Render the `list_work_tasks` outcome into an MCP `tools/call` result.
+pub fn render_work_tasks_result(outcome: &Value) -> Value {
+    let tasks = outcome
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut text = match outcome.get("note").and_then(Value::as_str) {
+        Some(note) if tasks.is_empty() => format!("Work-task board: {note}\n"),
+        _ => format!("Work-task board ({} task(s))\n", tasks.len()),
+    };
+    for t in &tasks {
+        let s = |k: &str| t.get(k).and_then(Value::as_str);
+        let id = t.get("id").and_then(Value::as_i64).unwrap_or(0);
+        text.push_str(&format!(
+            "\n#{} [{}] {} (folder {})\n",
+            id,
+            s("status").unwrap_or(""),
+            s("title").unwrap_or(""),
+            t.get("folder_id").and_then(Value::as_i64).unwrap_or(0),
+        ));
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(agent) = s("agent_type").filter(|v| !v.is_empty()) {
+            meta.push(format!("agent: {agent}"));
+        }
+        if let Some(cid) = t.get("conversation_id").and_then(Value::as_i64) {
+            meta.push(format!("conversation: codeg://session/{cid}"));
+        }
+        if let Some(sched) = s("scheduled_at").filter(|s| !s.is_empty()) {
+            meta.push(format!("scheduled: {sched}"));
+        }
+        if !meta.is_empty() {
+            text.push_str(&format!("  {}\n", meta.join(" | ")));
+        }
+        for (label, key) in [
+            ("progress", "latest_progress"),
+            ("summary", "result_summary"),
+            ("failure", "failure_reason"),
+            ("verdict", "verdict"),
+        ] {
+            if let Some(v) = s(key).filter(|s| !s.is_empty()) {
+                text.push_str(&format!("  {label}: {v}\n"));
+            }
+        }
+    }
+    read_result(text, outcome)
+}
+
+/// Render the `list_automations` outcome into an MCP `tools/call` result.
+pub fn render_automations_result(outcome: &Value) -> Value {
+    let items = outcome
+        .get("automations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut text = match outcome.get("note").and_then(Value::as_str) {
+        Some(note) if items.is_empty() => format!("Automations: {note}\n"),
+        _ => format!("Automations ({} saved)\n", items.len()),
+    };
+    for a in &items {
+        let s = |k: &str| a.get(k).and_then(Value::as_str);
+        let id = a.get("id").and_then(Value::as_i64).unwrap_or(0);
+        let enabled = a.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let trigger = if s("trigger_kind") == Some("schedule") {
+            match s("cron").filter(|c| !c.is_empty()) {
+                Some(cron) => format!("schedule {cron} ({})", s("timezone").unwrap_or("UTC")),
+                None => "schedule".to_string(),
+            }
+        } else {
+            "manual".to_string()
+        };
+        text.push_str(&format!(
+            "\n#{} [{}] {} — {}, agent {}\n",
+            id,
+            if enabled { "on" } else { "off" },
+            s("name").unwrap_or(""),
+            trigger,
+            s("agent_type").unwrap_or(""),
+        ));
+        let mut meta: Vec<String> = Vec::new();
+        if let Some(action) = s("action").filter(|v| !v.is_empty()) {
+            meta.push(action.to_string());
+        }
+        if let Some(next) = s("next_run_at").filter(|s| !s.is_empty()) {
+            meta.push(format!("next: {next}"));
+        }
+        if let Some(last) = s("last_run_at").filter(|s| !s.is_empty()) {
+            meta.push(format!(
+                "last: {last} ({})",
+                s("last_run_status").unwrap_or("?")
+            ));
+        }
+        if !meta.is_empty() {
+            text.push_str(&format!("  {}\n", meta.join(" | ")));
+        }
+        if let Some(fails) = a.get("unseen_failures").and_then(Value::as_i64) {
+            if fails > 0 {
+                text.push_str(&format!("  unseen failures: {fails}\n"));
+            }
+        }
+    }
+    read_result(text, outcome)
+}
+
+/// Render the `list_canvas_nodes` outcome into an MCP `tools/call` result.
+/// Three shapes arrive: `boards` (no board_id was given), `nodes` (one
+/// board's set) and `unavailable` (bad board / failed read).
+pub fn render_canvas_result(outcome: &Value) -> Value {
+    let text = match outcome.get("kind").and_then(Value::as_str) {
+        Some("boards") => {
+            let boards = outcome
+                .get("boards")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut text = format!("Canvas boards ({})\n", boards.len());
+            for b in &boards {
+                let board = b.get("board");
+                let id = board
+                    .and_then(|b| b.get("id"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0);
+                let name = board
+                    .and_then(|b| b.get("name"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("(untitled)");
+                let desc = board
+                    .and_then(|b| b.get("description"))
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|d| format!(" — {d}"))
+                    .unwrap_or_default();
+                text.push_str(&format!(
+                    "\n#{} {} ({} node(s), {} terminal){}\n",
+                    id,
+                    name,
+                    b.get("node_count").and_then(Value::as_i64).unwrap_or(0),
+                    b.get("terminal_count").and_then(Value::as_i64).unwrap_or(0),
+                    desc,
+                ));
+            }
+            text.push_str("\nCall again with `board_id` to read one board's nodes.\n");
+            text
+        }
+        Some("nodes") => {
+            let board_id = outcome.get("board_id").and_then(Value::as_i64).unwrap_or(0);
+            let nodes = outcome
+                .get("nodes")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut text = format!("Canvas board #{board_id} ({} node(s))\n", nodes.len());
+            for n in &nodes {
+                let s = |k: &str| n.get(k).and_then(Value::as_str);
+                let id = n.get("id").and_then(Value::as_i64).unwrap_or(0);
+                text.push_str(&format!(
+                    "\n#{} [{}] {} ({}, {}) {}x{}\n",
+                    id,
+                    s("kind").unwrap_or("?"),
+                    s("title").filter(|t| !t.is_empty()).unwrap_or("(untitled)"),
+                    n.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+                    n.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+                    n.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+                    n.get("height").and_then(Value::as_f64).unwrap_or(0.0),
+                ));
+                if let Some(cid) = n.get("conversation_id").and_then(Value::as_i64) {
+                    text.push_str(&format!("  conversation: codeg://session/{cid}\n"));
+                }
+                if let Some(path) = s("path").filter(|p| !p.is_empty()) {
+                    text.push_str(&format!("  path: {path}\n"));
+                }
+                if let Some(content) = s("content").filter(|c| !c.is_empty()) {
+                    text.push_str(&format!("  content: {content}\n"));
+                }
+            }
+            text
+        }
+        _ => outcome
+            .get("note")
+            .and_then(Value::as_str)
+            .unwrap_or("Canvas is unavailable.")
+            .to_string(),
+    };
+    read_result(text, outcome)
 }
 
 /// Extract `maxChars` from the `browser_snapshot` arguments.
@@ -4404,6 +4683,7 @@ mod tests {
             tasks: false,
             automations: false,
             taskboard: false,
+            canvas: false,
             browser: false,
             browser_eval: false,
             computer: false,
@@ -5087,6 +5367,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: false,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5101,6 +5382,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: false,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5115,6 +5397,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: false,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5129,6 +5412,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: false,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5619,6 +5903,7 @@ mod tests {
         tasks: false,
         automations: true,
         taskboard: false,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5633,6 +5918,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: true,
+        canvas: false,
         browser: false,
         browser_eval: false,
         computer: false,
@@ -5641,7 +5927,8 @@ mod tests {
     };
 
     /// The two authoring groups gate independently: enabling one must not
-    /// surface the other's tool.
+    /// surface the other's tools. The read-back tools (`list_automations` /
+    /// `list_work_tasks`) ride their group's switch — same surface, same gate.
     #[tokio::test]
     async fn tools_list_gates_authoring_tools_independently() {
         let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
@@ -5649,12 +5936,20 @@ mod tests {
         let names = list_tool_names(dispatch_for_test(list).await);
         assert!(!names.contains(&"create_automation".to_string()));
         assert!(!names.contains(&"create_work_task".to_string()));
+        assert!(!names.contains(&"list_automations".to_string()));
+        assert!(!names.contains(&"list_work_tasks".to_string()));
 
         let names = list_tool_names(dispatch_with_features(AUTOMATIONS_ONLY, list).await);
-        assert_eq!(names, vec!["create_automation".to_string()]);
+        assert_eq!(
+            names,
+            vec!["create_automation".to_string(), "list_automations".to_string()]
+        );
 
         let names = list_tool_names(dispatch_with_features(TASKBOARD_ONLY, list).await);
-        assert_eq!(names, vec!["create_work_task".to_string()]);
+        assert_eq!(
+            names,
+            vec!["create_work_task".to_string(), "list_work_tasks".to_string()]
+        );
     }
 
     /// Calling a tool whose group is off is rejected as an unknown tool — same
@@ -5739,6 +6034,179 @@ mod tests {
             assert_eq!(e.code, -32602);
             assert!(e.message.contains(expect), "got: {}", e.message);
         }
+    }
+
+    // -- board reads: gating + argument validation + rendering ---------------
+
+    const CANVAS_ONLY: CompanionFeatures = CompanionFeatures {
+        delegation: false,
+        feedback: false,
+        ask: false,
+        sessions: false,
+        tasks: false,
+        automations: false,
+        taskboard: false,
+        canvas: true,
+        browser: false,
+        browser_eval: false,
+        computer: false,
+        computer_launch: false,
+        computer_clipboard: false,
+    };
+
+    /// The canvas read travels with every companion (the parent emits `canvas`
+    /// unconditionally), and a lone `--features canvas` still lists it — the
+    /// group has no second switch to require.
+    #[tokio::test]
+    async fn tools_list_gates_the_canvas_read() {
+        let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+        // Default ctx (delegation-only): no canvas tool.
+        let names = list_tool_names(dispatch_for_test(list).await);
+        assert!(!names.contains(&"list_canvas_nodes".to_string()));
+
+        let names = list_tool_names(dispatch_with_features(CANVAS_ONLY, list).await);
+        assert_eq!(names, vec!["list_canvas_nodes".to_string()]);
+    }
+
+    /// Optional id arguments tolerate the same shapes `session_id` does, but a
+    /// non-integer is rejected synchronously so the LLM can fix it.
+    #[tokio::test]
+    async fn board_read_bad_ids_rejected_synchronously() {
+        for (name, args, expect) in [
+            (
+                "list_work_tasks",
+                json!({ "folder_id": "not-a-number" }),
+                "folder_id",
+            ),
+            (
+                "list_canvas_nodes",
+                json!({ "board_id": true }),
+                "board_id",
+            ),
+        ] {
+            let features = if name == "list_work_tasks" {
+                TASKBOARD_ONLY
+            } else {
+                CANVAS_ONLY
+            };
+            let line = json!({
+                "jsonrpc": "2.0", "id": 45, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            })
+            .to_string();
+            let resp = unwrap_respond(dispatch_with_features(features, &line).await);
+            let e = resp.error.expect("bad ids must be rejected");
+            assert_eq!(e.code, -32602);
+            assert!(e.message.contains(expect), "got: {}", e.message);
+        }
+        // The tolerant shapes spawn (they would round-trip to the broker —
+        // unreachable in tests, so just assert the Spawn, as the create tests
+        // above do).
+        for (name, args, features) in [
+            ("list_work_tasks", json!({ "folder_id": " 3 " }), TASKBOARD_ONLY),
+            ("list_work_tasks", json!({ "status": "todo" }), TASKBOARD_ONLY),
+            ("list_automations", json!({}), AUTOMATIONS_ONLY),
+            ("list_canvas_nodes", json!({ "board_id": 7.0 }), CANVAS_ONLY),
+        ] {
+            let line = json!({
+                "jsonrpc": "2.0", "id": 46, "method": "tools/call",
+                "params": { "name": name, "arguments": args }
+            })
+            .to_string();
+            assert!(
+                matches!(dispatch_with_features(features, &line).await, LineAction::Spawn(_)),
+                "{name} with {args} should spawn"
+            );
+        }
+    }
+
+    #[test]
+    fn render_work_tasks_result_lists_rows_and_notes() {
+        let outcome = json!({
+            "tasks": [{
+                "id": 7, "folder_id": 2, "title": "Fix the flake", "status": "running",
+                "agent_type": "claude_code", "conversation_id": 99,
+                "latest_progress": "editing retry_test.rs",
+                "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+            }]
+        });
+        let rendered = render_work_tasks_result(&outcome);
+        assert_eq!(rendered["isError"], false);
+        let text = rendered["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("1 task(s)"));
+        assert!(text.contains("#7 [running] Fix the flake (folder 2)"));
+        assert!(text.contains("agent: claude_code"));
+        assert!(text.contains("codeg://session/99"));
+        assert!(text.contains("progress: editing retry_test.rs"));
+
+        // A note with nothing behind it is surfaced as text, not an error.
+        let off = json!({ "tasks": [], "note": "turned off in codeg's settings" });
+        let rendered = render_work_tasks_result(&off);
+        assert!(rendered["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("turned off"));
+    }
+
+    #[test]
+    fn render_automations_result_lists_rows() {
+        let outcome = json!({
+            "automations": [{
+                "id": 3, "name": "Nightly audit", "enabled": true,
+                "trigger_kind": "schedule", "cron": "0 3 * * *", "timezone": "UTC",
+                "agent_type": "claude_code", "action": "enqueue_task",
+                "next_run_at": "2026-01-02T03:00:00Z",
+                "last_run_at": "2026-01-01T03:00:00Z", "last_run_status": "failed",
+                "unseen_failures": 2
+            }]
+        });
+        let text = render_automations_result(&outcome)["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(text.contains("Automations (1 saved)"));
+        assert!(text.contains("#3 [on] Nightly audit — schedule 0 3 * * * (UTC)"));
+        assert!(text.contains("enqueue_task"));
+        assert!(text.contains("last: 2026-01-01T03:00:00Z (failed)"));
+        assert!(text.contains("unseen failures: 2"));
+    }
+
+    #[test]
+    fn render_canvas_result_covers_all_three_shapes() {
+        let boards = json!({
+            "kind": "boards",
+            "boards": [{
+                "board": { "id": 4, "name": "Lab", "description": null },
+                "node_count": 12, "terminal_count": 1
+            }]
+        });
+        let rendered = render_canvas_result(&boards);
+        let text = rendered["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Canvas boards (1)"));
+        assert!(text.contains("#4 Lab (12 node(s), 1 terminal)"));
+        assert!(text.contains("board_id"));
+
+        let nodes = json!({
+            "kind": "nodes", "board_id": 4, "revision": 9,
+            "nodes": [{
+                "id": 11, "kind": "note", "title": "Ideas", "x": 10.0, "y": 20.0,
+                "width": 300.0, "height": 200.0, "content": "ship it",
+                "member_ids": []
+            }]
+        });
+        let rendered = render_canvas_result(&nodes);
+        let text = rendered["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("Canvas board #4 (1 node(s))"));
+        assert!(text.contains("#11 [note] Ideas (10, 20) 300x200"));
+        assert!(text.contains("content: ship it"));
+
+        let bad = json!({ "kind": "unavailable", "note": "canvas board 4 not found" });
+        let rendered = render_canvas_result(&bad);
+        assert_eq!(rendered["isError"], false);
+        assert!(rendered["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("not found"));
     }
 
     #[test]
@@ -6456,6 +6924,7 @@ mod tests {
         tasks: false,
         automations: false,
         taskboard: false,
+        canvas: false,
         browser: true,
         browser_eval: false,
         computer: false,

@@ -23,18 +23,23 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 
 use crate::acp::chat_authoring::{
-    local_timezone, AuthoringContext, AuthoringOutcome, ChatAuthoringAccess, ChatAuthoringConfig,
-    ChatAuthoringRuntimeConfig, NewAutomationSpec, NewWorkTaskSpec,
+    local_timezone, AutomationsRead, AutomationRow, AuthoringContext, AuthoringOutcome,
+    BoardTaskRow, CanvasReadOutcome, ChatAuthoringAccess, ChatAuthoringConfig,
+    ChatAuthoringRuntimeConfig, NewAutomationSpec, NewWorkTaskSpec, WorkTasksRead,
 };
 use crate::acp::types::PromptInputBlock;
 use crate::app_error::AppCommandError;
 use crate::db::entities::automation::{IsolationMode, TriggerKind};
 use crate::db::entities::folder::FolderKind;
-use crate::db::service::{app_metadata_service, conversation_service, folder_service};
+use crate::db::service::{
+    app_metadata_service, automation_service, canvas_service, conversation_service, folder_service,
+    work_task_service,
+};
 use crate::db::AppDatabase;
 use crate::models::agent::AgentType;
 use crate::models::{
-    AutomationConfig, AutomationDraft, FolderDetail, WorkTaskConfig, WorkTaskDraft,
+    AutomationAction, AutomationConfig, AutomationDraft, CanvasBoardSummary, CanvasNode,
+    FolderDetail, WorkTaskConfig, WorkTaskDraft,
 };
 use crate::web::event_bridge::{emit_event, EventEmitter, CHAT_AUTHORING_SETTINGS_CHANGED_EVENT};
 
@@ -368,6 +373,143 @@ impl ChatAuthoringAccess for DbChatAuthoring {
             Err(e) => AuthoringOutcome::rejected(KIND_WORK_TASK, e.to_string()),
         }
     }
+
+    async fn list_work_tasks(
+        &self,
+        status: Option<String>,
+        folder_id: Option<i32>,
+    ) -> WorkTasksRead {
+        // Same call-time re-check as the create arm: the tool stays listed for
+        // sessions launched while the switch was on, and "off" must stop the
+        // read too, not just the write.
+        if !self.config.work_tasks_enabled().await {
+            return WorkTasksRead {
+                tasks: Vec::new(),
+                note: Some(
+                    "Reading the work-task board from chat is turned off in codeg's \
+                     settings (Settings → General → Create from chat)."
+                        .to_string(),
+                ),
+            };
+        }
+        match work_task_service::list(&self.db.conn, folder_id).await {
+            Ok(infos) => WorkTasksRead {
+                tasks: infos
+                    .into_iter()
+                    .filter(|t| match &status {
+                        // The companion validates the spelling, so an unknown
+                        // string here just matches nothing — the empty list IS
+                        // the honest answer for "no cards in that state".
+                        Some(wanted) => work_task_service::status_str(t.status) == wanted,
+                        None => true,
+                    })
+                    .map(|t| BoardTaskRow {
+                        id: t.id,
+                        folder_id: t.folder_id,
+                        title: t.title,
+                        status: work_task_service::status_str(t.status).to_string(),
+                        agent_type: t.agent_type,
+                        conversation_id: t.conversation_id,
+                        verdict: t.verdict,
+                        result_summary: t.result_summary,
+                        failure_reason: t.failure_reason,
+                        latest_progress: t.latest_progress,
+                        scheduled_at: t.scheduled_at,
+                        created_at: t.created_at,
+                        updated_at: t.updated_at,
+                    })
+                    .collect(),
+                note: None,
+            },
+            Err(e) => WorkTasksRead {
+                tasks: Vec::new(),
+                note: Some(format!("could not read the board: {e}")),
+            },
+        }
+    }
+
+    async fn list_automations(&self) -> AutomationsRead {
+        if !self.config.automations_enabled().await {
+            return AutomationsRead {
+                automations: Vec::new(),
+                note: Some(
+                    "Reading automations from chat is turned off in codeg's settings \
+                     (Settings → General → Create from chat)."
+                        .to_string(),
+                ),
+            };
+        }
+        match automation_service::list(&self.db.conn).await {
+            Ok(infos) => AutomationsRead {
+                automations: infos
+                    .into_iter()
+                    .map(|a| AutomationRow {
+                        id: a.id,
+                        name: a.name,
+                        enabled: a.enabled,
+                        trigger_kind: match a.trigger_kind {
+                            TriggerKind::Schedule => "schedule",
+                            TriggerKind::Manual => "manual",
+                        }
+                        .to_string(),
+                        cron: a.cron,
+                        timezone: a.timezone,
+                        next_run_at: a.next_run_at,
+                        agent_type: a.agent_type,
+                        action: action_str(&a.config),
+                        last_run_at: a.last_run_at,
+                        last_run_status: a.last_run_status,
+                        unseen_failures: a.unseen_failures,
+                    })
+                    .collect(),
+                note: None,
+            },
+            Err(e) => AutomationsRead {
+                automations: Vec::new(),
+                note: Some(format!("could not read the automations: {e}")),
+            },
+        }
+    }
+
+    async fn read_canvas(&self, board_id: Option<i32>) -> CanvasReadOutcome {
+        let Some(board_id) = board_id else {
+            // No board named: the board list is the answer. It is a plain read
+            // (a deleted-since board just drops out of the list), so a failure
+            // degrades to the empty list plus a note rather than an error arm.
+            return match canvas_service::list_boards(&self.db.conn).await {
+                Ok(boards) => CanvasReadOutcome::Boards {
+                    boards: boards.into_iter().map(CanvasBoardSummary::from).collect(),
+                },
+                Err(e) => CanvasReadOutcome::Unavailable {
+                    note: format!("could not read the canvas boards: {e}"),
+                },
+            };
+        };
+        match canvas_service::snapshot(&self.db.conn, board_id).await {
+            Ok((nodes, revision)) => CanvasReadOutcome::Nodes {
+                board_id,
+                revision,
+                nodes: nodes.into_iter().map(CanvasNode::from).collect(),
+            },
+            Err(e) => CanvasReadOutcome::Unavailable {
+                note: format!("could not read canvas board {board_id}: {e}"),
+            },
+        }
+    }
+}
+
+/// The automation's action, read back out of the stored config blob. An
+/// unparseable blob degrades to the default action rather than failing the
+/// read — the row is still schedulable, just opaque.
+fn action_str(config: &serde_json::Value) -> String {
+    match serde_json::from_value::<AutomationConfig>(config.clone())
+        .map(|c| c.action)
+        .unwrap_or_default()
+    {
+        AutomationAction::LaunchSession => "launch_session",
+        AutomationAction::EnqueueTask => "enqueue_task",
+    }
+    .to_string()
 }
 
 // ===========================================================================
@@ -618,7 +760,7 @@ mod tests {
 
     // ── integration: the real write path against an in-memory DB ────────────
 
-    use crate::db::service::{automation_service, work_task_service};
+    use crate::db::service::{automation_service, canvas_service, work_task_service};
     use crate::db::test_helpers::fresh_in_memory_db;
 
     /// Wire a `DbChatAuthoring` over a fresh DB with both flags set as given.
@@ -863,5 +1005,143 @@ mod tests {
         apply_persisted_chat_authoring_config(&db.conn, &fresh).await;
         assert!(fresh.automations_enabled().await);
         assert!(!fresh.work_tasks_enabled().await);
+    }
+
+    /// The board read mirrors the create arm's gate: switch off → empty list
+    /// with a note (never an error), switch on → the real rows, projected
+    /// compact, with the status / folder filters applied.
+    #[tokio::test]
+    async fn list_work_tasks_gates_projects_and_filters() {
+        let (_db, access, _cfg) = harness(false, false).await;
+        let off = access.list_work_tasks(None, None).await;
+        assert!(off.tasks.is_empty());
+        assert!(off.note.is_some(), "switch off explains itself");
+
+        let (db, access, _cfg) = harness(false, true).await;
+        let folder = folder_service::add_folder(&db.conn, "/repo/board")
+            .await
+            .unwrap();
+        let other = folder_service::add_folder(&db.conn, "/repo/other")
+            .await
+            .unwrap();
+        let out = access
+            .create_work_task(ctx_at("/repo/board"), work_task_spec())
+            .await;
+        assert!(out.created, "note: {:?}", out.note);
+        let other_out = crate::db::service::work_task_service::create(
+            &db.conn,
+            WorkTaskDraft {
+                folder_id: other.id,
+                title: "Other folder task".into(),
+                config: serde_json::json!({ "display_text": "x" }),
+            },
+        )
+        .await
+        .unwrap();
+
+        let all = access.list_work_tasks(None, None).await;
+        assert_eq!(all.tasks.len(), 2, "no note on a clean read");
+        assert!(all.note.is_none());
+        let first = &all.tasks[0];
+        assert_eq!(first.id, out.id.unwrap());
+        assert_eq!(first.title, "Fix the flake");
+        assert_eq!(first.status, "todo");
+        assert!(first.latest_progress.is_none());
+        assert_eq!(first.created_at, all.tasks[0].created_at);
+
+        let todos = access.list_work_tasks(Some("todo".into()), None).await;
+        assert_eq!(todos.tasks.len(), 2);
+        let done = access.list_work_tasks(Some("done".into()), None).await;
+        assert!(done.tasks.is_empty(), "status filters, unknown matches none");
+
+        let mine = access.list_work_tasks(None, Some(folder.id)).await;
+        assert_eq!(mine.tasks.len(), 1);
+        assert_eq!(mine.tasks[0].id, out.id.unwrap());
+        let theirs = access
+            .list_work_tasks(None, Some(other.id))
+            .await;
+        assert_eq!(theirs.tasks[0].id, other_out.id);
+    }
+
+    /// The automations read rides the same gate and reports the trigger /
+    /// action the fire path needs.
+    #[tokio::test]
+    async fn list_automations_gates_and_projects() {
+        let (_db, access, _cfg) = harness(false, true).await;
+        let off = access.list_automations().await;
+        assert!(off.automations.is_empty());
+        assert!(off.note.is_some());
+
+        let (db, access, _cfg) = harness(true, false).await;
+        folder_service::add_folder(&db.conn, "/repo/auto")
+            .await
+            .unwrap();
+        let out = access
+            .create_automation(ctx_at("/repo/auto"), automation_spec())
+            .await;
+        assert!(out.created, "note: {:?}", out.note);
+
+        let read = access.list_automations().await;
+        assert!(read.note.is_none());
+        assert_eq!(read.automations.len(), 1);
+        let row = &read.automations[0];
+        assert_eq!(row.id, out.id.unwrap());
+        assert_eq!(row.name, "Nightly audit");
+        assert!(row.enabled);
+        assert_eq!(row.trigger_kind, "schedule");
+        assert_eq!(row.cron.as_deref(), Some("0 3 * * *"));
+        assert_eq!(row.action, "launch_session");
+        assert_eq!(row.agent_type, "claude_code");
+        assert!(row.next_run_at.is_some());
+    }
+
+    /// The canvas read lists boards when no board is named, returns one
+    /// board's node set when it is, and degrades a bad board to
+    /// `Unavailable` with a note — never a hard error.
+    #[tokio::test]
+    async fn read_canvas_lists_boards_then_nodes() {
+        let (_db, access, _cfg) = harness(false, false).await;
+        let empty = access.read_canvas(None).await;
+        match &empty {
+            CanvasReadOutcome::Boards { boards } => assert!(boards.is_empty()),
+            other => panic!("expected boards, got {other:?}"),
+        }
+
+        let db = &access.db;
+        let board = canvas_service::create_board(
+            &db.conn,
+            canvas_service::NewCanvasBoard {
+                name: Some("Lab".into()),
+                description: Some("scratch".into()),
+                color: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let boards = access.read_canvas(None).await;
+        match boards {
+            CanvasReadOutcome::Boards { boards } => {
+                assert_eq!(boards.len(), 1);
+                assert_eq!(boards[0].board.id, board.id);
+                assert_eq!(boards[0].node_count, 0);
+            }
+            other => panic!("expected boards, got {other:?}"),
+        }
+
+        let nodes = access.read_canvas(Some(board.id)).await;
+        match nodes {
+            CanvasReadOutcome::Nodes { board_id, nodes, .. } => {
+                assert_eq!(board_id, board.id);
+                assert!(nodes.is_empty());
+            }
+            other => panic!("expected nodes, got {other:?}"),
+        }
+
+        let missing = access.read_canvas(Some(999_999)).await;
+        match &missing {
+            CanvasReadOutcome::Unavailable { note } => assert!(note.contains("999999")),
+            other => panic!("expected unavailable, got {other:?}"),
+        }
     }
 }
