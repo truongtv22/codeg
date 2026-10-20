@@ -124,12 +124,73 @@ pub struct SessionStats {
     pub context_window_usage_percent: Option<f64>,
 }
 
+/// What a session's transcript records about the auxiliary work it did, beyond
+/// the conversation itself: the skills it invoked and the background tasks
+/// that settled. A pure function of the transcript bytes — parsed with the
+/// detail (see `parsers::claude`), so a reopened session shows it without any
+/// live state. Present only for parsers that can derive it (Claude today;
+/// `None` elsewhere, which the UI reads as "no activity sections").
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionActivity {
+    /// Skills invoked via the `Skill` tool, grouped by name in first-use order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<SkillUse>,
+    /// Background tasks with a final `<task-notification>` (completed /
+    /// failed / stopped). Still-running tasks are NOT here: the live view of
+    /// those comes from the connection's async-task stream, and the
+    /// transcript alone cannot tell a live task from a dead CLI (the
+    /// zombie-"running" trap — see `parsers::claude`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub background_tasks: Vec<BackgroundTaskInfo>,
+}
+
+/// One skill's tally: how many times the session invoked it and when it last
+/// did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillUse {
+    pub name: String,
+    pub call_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// One settled background task, as the transcript's launch ack and final
+/// `<task-notification>` describe it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackgroundTaskInfo {
+    pub task_id: String,
+    /// The notification's summary line (the agent's description or the
+    /// command's outcome). Falls back to the task id when the transcript
+    /// carries neither.
+    pub name: String,
+    /// `"task"` for a task with a recorded async-launch ack (the `Agent` tool's
+    /// background form), `"shell"` for anything else (a background `Bash`).
+    /// Not a full taxonomy on purpose: the transcript does not name workflow
+    /// vs monitor, and the icon falls back on unknown values.
+    pub task_type: String,
+    /// Final notification status: `completed` | `failed` | `stopped` (plus the
+    /// rarer terminal spellings the CLI writes).
+    pub state: String,
+    /// Reserved for the task's last tool call; no transcript source today,
+    /// always `None` (the UI hides it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_tool_name: Option<String>,
+    /// The task's `<output-file>` when its notification carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_file_path: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationDetail {
     pub summary: ConversationSummary,
     pub turns: Vec<MessageTurn>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_stats: Option<SessionStats>,
+    /// Skills + settled background tasks read off the transcript, for the
+    /// aux panel's Activity tab. Only the parsers that can derive it set
+    /// `Some` (Claude today); the absent field reads as "no activity".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_activity: Option<SessionActivity>,
     /// Byte length of the source transcript this parse consumed (exact — the
     /// parser measures the buffer it read, never a racy stat). Present only
     /// for parsers reading a single session file (Claude today; `None`
@@ -147,6 +208,10 @@ pub struct DbConversationDetail {
     pub turns: Vec<MessageTurn>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_stats: Option<SessionStats>,
+    /// See [`ConversationDetail::session_activity`] — threaded through from
+    /// the parser detail on the DB-backed fetch path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_activity: Option<SessionActivity>,
     /// See [`ConversationDetail::transcript_watermark`] — threaded through from
     /// the parser detail on the DB-backed fetch path.
     #[serde(skip_serializing_if = "Option::is_none")]

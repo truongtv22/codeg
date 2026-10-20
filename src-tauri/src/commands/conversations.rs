@@ -1429,7 +1429,15 @@ pub async fn get_folder_conversation_core(
         .await
         .map_err(AppCommandError::from)?;
 
-    let (mut turns, session_stats, resolved_ext_id, parsed_title, parsed_model, transcript_watermark) =
+    let (
+        mut turns,
+        session_stats,
+        session_activity,
+        resolved_ext_id,
+        parsed_title,
+        parsed_model,
+        transcript_watermark,
+    ) =
         if let Some(ref ext_id) = summary.external_id {
         let at = summary.agent_type;
         let eid = ext_id.clone();
@@ -1461,6 +1469,7 @@ pub async fn get_folder_conversation_core(
                     Ok((
                         d.turns,
                         d.session_stats,
+                        d.session_activity,
                         resolved,
                         d.summary.title,
                         d.summary.model,
@@ -1502,6 +1511,7 @@ pub async fn get_folder_conversation_core(
                                     return Ok((
                                         d.turns,
                                         d.session_stats,
+                                        d.session_activity,
                                         Some(new_ext_id),
                                         d.summary.title,
                                         d.summary.model,
@@ -1511,7 +1521,7 @@ pub async fn get_folder_conversation_core(
                             }
                         }
                     }
-                    Ok((vec![], None, None, None, None, None))
+                    Ok((vec![], None, None, None, None, None, None))
                 }
                 Err(e) => Err(parse_error_to_app_error(e)),
             }
@@ -1524,7 +1534,7 @@ pub async fn get_folder_conversation_core(
             .with_detail(e.to_string())
         })??
     } else {
-        (vec![], None, None, None, None, None)
+        (vec![], None, None, None, None, None, None)
     };
 
     // If we resolved a different external_id (e.g. ACP UUID → parser branch ID,
@@ -1611,6 +1621,7 @@ pub async fn get_folder_conversation_core(
             summary,
             turns,
             session_stats,
+            session_activity,
             transcript_watermark,
             in_flight_user_turn_id: None,
             turns_offset: None,
@@ -7011,6 +7022,7 @@ mod tests {
             },
             turns,
             session_stats: None,
+            session_activity: None,
             transcript_watermark: Some(123),
             in_flight_user_turn_id: None,
             turns_offset: None,

@@ -2286,6 +2286,45 @@
       "copiedField": "已复制{field}",
       "assistant": "助手"
     },
+    "activity": {
+      "tabLabel": "活动",
+      "live": {
+        "title": "进行中",
+        "subagents": "{count} 个子智能体正在运行",
+        "stop": "停止"
+      },
+      "background": {
+        "title": "后台任务",
+        "state": {
+          "completed": "已完成",
+          "failed": "失败",
+          "stopped": "已停止",
+          "canceled": "已取消",
+          "cancelled": "已取消",
+          "killed": "已终止",
+          "timeout": "超时",
+          "timed_out": "超时",
+          "error": "错误"
+        }
+      },
+      "skills": {
+        "title": "已用技能",
+        "calls": "{count} 次调用"
+      },
+      "subagents": {
+        "title": "子智能体"
+      },
+      "files": {
+        "title": "变更文件",
+        "mode": {
+          "added": "新增",
+          "modified": "修改",
+          "deleted": "删除"
+        },
+        "showDiff": "显示差异",
+        "hideDiff": "隐藏差异"
+      }
+    },
     "conversationCard": {
       "untitledConversation": "未命名会话",
       "newConversation": "新建会话",

@@ -149,6 +149,7 @@ const KEY = "workspace:right-sidebar-tab-order"
 /** The rail in the built-in order, by name. */
 const BUILT_IN = [
   "Session Details",
+  "Activity",
   "Files",
   "Changes",
   "Commits",
@@ -168,8 +169,20 @@ const REVERSED: AuxPanelTab[] = [
   "changes",
   "file_tree",
   "session_details",
+  "activity",
 ]
-const REVERSED_NAMES = [...BUILT_IN].reverse()
+// REVERSED stored order ends ...session_details, activity — not the reverse of BUILT_IN.
+const REVERSED_NAMES = [
+  "Pull requests",
+  "Issues",
+  "To-dos",
+  "Automations",
+  "Commits",
+  "Changes",
+  "Files",
+  "Session Details",
+  "Activity",
+]
 
 function renderPanel() {
   return render(
@@ -365,6 +378,7 @@ describe("AuxPanel", () => {
         "tasks",
         "file_tree",
         "session_details",
+        "activity",
         "issues",
         "git_log",
         "changes",
@@ -376,6 +390,7 @@ describe("AuxPanel", () => {
       "To-dos",
       "Files",
       "Session Details",
+      "Activity",
       "Issues",
       "Commits",
       "Changes",
@@ -399,6 +414,7 @@ describe("AuxPanel", () => {
       "Changes",
       "Files",
       "Session Details",
+      "Activity",
     ])
   })
 
@@ -407,6 +423,7 @@ describe("AuxPanel", () => {
     const dragged = [
       "changes",
       "session_details",
+      "activity",
       "file_tree",
       "git_log",
       "automations",
@@ -417,6 +434,7 @@ describe("AuxPanel", () => {
     const draggedNames = [
       "Changes",
       "Session Details",
+      "Activity",
       "Files",
       "Commits",
       "Automations",
@@ -467,6 +485,7 @@ describe("AuxPanel", () => {
     fireEvent.keyDown(changes, { key: "ArrowUp", altKey: true })
     expect(railTabs()).toEqual([
       "Session Details",
+      "Activity",
       "Changes",
       "Files",
       "Commits",
@@ -477,6 +496,7 @@ describe("AuxPanel", () => {
     ])
     expect(storedOrder()).toEqual([
       "session_details",
+      "activity",
       "changes",
       "file_tree",
       "git_log",
@@ -487,10 +507,14 @@ describe("AuxPanel", () => {
     ])
     expect(screen.getByRole("tab", { name: "Changes" })).toHaveFocus()
 
-    fireEvent.keyDown(screen.getByRole("tab", { name: "Changes" }), {
-      key: "ArrowUp",
-      altKey: true,
-    })
+    // Activity and file_tree sit between Changes and the top in the built-in
+    // order now: three nudges climb over them.
+    for (let i = 0; i < 2; i++) {
+      fireEvent.keyDown(screen.getByRole("tab", { name: "Changes" }), {
+        key: "ArrowUp",
+        altKey: true,
+      })
+    }
     expect(railTabs()[0]).toBe("Changes")
     expect(screen.getByRole("tab", { name: "Changes" })).toHaveFocus()
 
@@ -503,7 +527,7 @@ describe("AuxPanel", () => {
     expect(localStorage.getItem(KEY)).toBe(before)
 
     // Back down to where it started: the stored value goes with it.
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 3; i++) {
       fireEvent.keyDown(screen.getByRole("tab", { name: "Changes" }), {
         key: "ArrowDown",
         altKey: true,

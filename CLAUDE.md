@@ -32,8 +32,8 @@ pnpm build                     # 静态导出构建
 
 ```bash
 # 桌面模式（默认 feature）
-cargo check
-cargo test --features test-utils
+cargo check --all-targets            # 日常本地验证用这条（见下方磁盘纪律）
+cargo test --features test-utils     # 仅在确需运行测试时
 cargo clippy --all-targets --features test-utils -- -D warnings
 
 # 服务器模式
@@ -49,6 +49,15 @@ cargo clippy --no-default-features --features mcp-bin --bin codeg-mcp -- -D warn
 cargo insta review
 INSTA_UPDATE=auto cargo test --features test-utils     # 自动写新 .snap
 ```
+
+### 磁盘纪律（target/ 体积控制，必须遵守）
+
+`cargo test` 会把每个测试二进制链接进 `target/debug/deps/`（每次改动产生新 hash，旧文件不会自动清理），历史上一度膨胀到 11G，把磁盘塞满。约定：
+
+- **本地日常验证一律用 `cargo check --all-targets`**（含 `--tests`）：只写 `.rmeta`、不链接任何测试二进制，能抓住编译/类型错误，几乎不占空间。lint 用 `clippy --all-targets` 同理。
+- **只在确需运行测试时才用 `cargo test`**（改了测试逻辑、验证运行时行为、发版前），其余情况交给 CI。跑完立即清理 crate 自身产物（保留依赖缓存，重编译很快）：`cargo clean -p codeg`。
+- **不要手动删除 target/ 里的单个文件**（会留下指纹不一致的缓存）；只允许 `cargo clean` / `cargo clean -p codeg`。
+- 若磁盘紧张且必须跑全量测试，可改用独立目录：`CARGO_TARGET_DIR=/tmp/codeg-test cargo test`，跑完 `rm -rf /tmp/codeg-test`。
 
 ## 架构
 

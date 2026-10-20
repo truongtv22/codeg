@@ -564,6 +564,7 @@ impl ClineParser {
             summary,
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         }
     }
@@ -906,6 +907,7 @@ impl ClineParser {
             summary,
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         })
     }

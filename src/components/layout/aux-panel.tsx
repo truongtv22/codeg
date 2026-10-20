@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import {
+  Activity,
   CircleDot,
   Folder,
   FolderPen,
@@ -33,6 +34,7 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { AuxPanelTabRail } from "./aux-panel-tab-rail"
 import { ChromeReserve } from "./chrome-reserve"
 import { SessionDetailsTab } from "./aux-panel-session-details-tab"
+import { ActivityTab } from "./aux-panel-activity-tab"
 import { FileTreeTab } from "./aux-panel-file-tree-tab"
 import { GitChangesTab } from "./aux-panel-git-changes-tab"
 import { GitLogTab } from "./aux-panel-git-log-tab"
@@ -41,6 +43,7 @@ import { TasksAuxTab } from "./aux-panel-tasks-tab"
 import { ForgeAuxTab } from "./aux-panel-forge-tab"
 
 const LAZY_TABS: AuxPanelTab[] = [
+  "activity",
   "file_tree",
   "changes",
   "git_log",
@@ -58,6 +61,7 @@ const LAZY_TABS: AuxPanelTab[] = [
 // issue and an open pull request.
 const TAB_ICONS: Record<AuxPanelTab, LucideIcon> = {
   session_details: ReceiptText,
+  activity: Activity,
   file_tree: Folder,
   changes: FolderPen,
   git_log: GitCommit,
@@ -107,6 +111,7 @@ export function resolveAuxTabView(
 export function AuxPanel() {
   const t = useTranslations("Folder.auxPanel.tabs")
   const tDetails = useTranslations("Folder.sessionDetails")
+  const tActivity = useTranslations("Folder.activity")
   const tAutomations = useTranslations("Automations")
   const tTasks = useTranslations("Tasks")
   const tForge = useTranslations("Forge")
@@ -175,6 +180,8 @@ export function AuxPanel() {
       switch (tab) {
         case "session_details":
           return tDetails("menuLabel")
+        case "activity":
+          return tActivity("tabLabel")
         case "automations":
           return tAutomations("title")
         case "tasks":
@@ -187,7 +194,7 @@ export function AuxPanel() {
           return t(FOLDER_TAB_LABEL_KEY[tab])
       }
     },
-    [t, tDetails, tAutomations, tTasks, tForge, forgeProvider]
+    [t, tDetails, tActivity, tAutomations, tTasks, tForge, forgeProvider]
   )
 
   const shownTabs = showFolderTabs ? tabOrder : SESSION_DETAILS_ONLY
@@ -202,6 +209,13 @@ export function AuxPanel() {
         className="mt-0 flex-1 min-h-0 overflow-hidden"
       >
         <SessionDetailsTab />
+      </TabsContent>
+      <TabsContent
+        value="activity"
+        forceMount
+        className="mt-0 flex-1 min-h-0 overflow-hidden"
+      >
+        {mountedTabs.has("activity") ? <ActivityTab /> : null}
       </TabsContent>
       <TabsContent
         value="file_tree"

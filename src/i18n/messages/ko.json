@@ -2286,6 +2286,45 @@
       "copiedField": "{field} 복사됨",
       "assistant": "어시스턴트"
     },
+    "activity": {
+      "tabLabel": "활동",
+      "live": {
+        "title": "실행 중",
+        "subagents": "{count}개 서브에이전트 실행 중",
+        "stop": "중지"
+      },
+      "background": {
+        "title": "백그라운드 작업",
+        "state": {
+          "completed": "완료",
+          "failed": "실패",
+          "stopped": "중지됨",
+          "canceled": "취소됨",
+          "cancelled": "취소됨",
+          "killed": "종료됨",
+          "timeout": "시간 초과",
+          "timed_out": "시간 초과",
+          "error": "오류"
+        }
+      },
+      "skills": {
+        "title": "사용한 스킬",
+        "calls": "{count}회 호출"
+      },
+      "subagents": {
+        "title": "서브에이전트"
+      },
+      "files": {
+        "title": "변경된 파일",
+        "mode": {
+          "added": "추가",
+          "modified": "수정",
+          "deleted": "삭제"
+        },
+        "showDiff": "차이 보기",
+        "hideDiff": "차이 숨기기"
+      }
+    },
     "conversationCard": {
       "untitledConversation": "제목 없는 대화",
       "newConversation": "새 대화",

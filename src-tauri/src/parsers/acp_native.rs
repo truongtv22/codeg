@@ -131,6 +131,7 @@ impl AgentParser for AcpNativeParser {
             summary: self.summarize(conversation_id, &transcript),
             turns,
             session_stats,
+            session_activity: None,
             // Not a single-file byte-watermark store; the background-overlay
             // hand-off this field drives is Claude-only.
             transcript_watermark: None,

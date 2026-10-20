@@ -2286,6 +2286,45 @@
       "copiedField": "{field} copiado",
       "assistant": "Asistente"
     },
+    "activity": {
+      "tabLabel": "Actividad",
+      "live": {
+        "title": "En vivo",
+        "subagents": "{count, plural, one {# subagente en ejecución} other {# subagentes en ejecución}}",
+        "stop": "Detener"
+      },
+      "background": {
+        "title": "Tareas en segundo plano",
+        "state": {
+          "completed": "completada",
+          "failed": "fallida",
+          "stopped": "detenida",
+          "canceled": "cancelada",
+          "cancelled": "cancelada",
+          "killed": "terminada",
+          "timeout": "tiempo agotado",
+          "timed_out": "tiempo agotado",
+          "error": "error"
+        }
+      },
+      "skills": {
+        "title": "Skills usadas",
+        "calls": "{count, plural, one {# llamada} other {# llamadas}}"
+      },
+      "subagents": {
+        "title": "Subagentes"
+      },
+      "files": {
+        "title": "Archivos modificados",
+        "mode": {
+          "added": "Añadido",
+          "modified": "Modificado",
+          "deleted": "Eliminado"
+        },
+        "showDiff": "Mostrar diff",
+        "hideDiff": "Ocultar diff"
+      }
+    },
     "conversationCard": {
       "untitledConversation": "Conversación sin título",
       "newConversation": "Nueva conversación",

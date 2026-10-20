@@ -348,6 +348,7 @@ impl GrokParser {
             summary,
             turns: parsed.turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         }
     }

@@ -65,7 +65,7 @@ export function SessionDetailsInsights({
  * `sticky` header stays at the top of the panel while the section scrolls
  * under it.
  */
-function InsightsSection({
+export function InsightsSection({
   title,
   summary,
   open,

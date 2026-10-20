@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import type { MessageNavEntry } from "@/components/message/conversation-message-nav"
 import type { DelegationCardSource } from "@/hooks/use-delegation-card-model"
 import {
+  demandTranscriptActivity,
   demandTranscriptNav,
   mergeTranscriptInsights,
   publishTranscriptInsights,
@@ -57,6 +58,7 @@ function insights(
   over: {
     nav?: Partial<TranscriptInsights["nav"]>
     plan?: Partial<TranscriptInsights["plan"]>
+    activity?: Partial<TranscriptInsights["activity"]>
     actions?: TranscriptInsightsActions
   } = {}
 ): TranscriptInsights {
@@ -73,12 +75,18 @@ function insights(
       ...over.nav,
     },
     plan: {
-      entries: [
+      entries: over.plan?.entries ?? [
         { content: "step one", status: "completed", priority: "high" },
         { content: "step two", status: "in_progress", priority: "medium" },
       ],
-      streaming: true,
-      ...over.plan,
+      streaming: over.plan?.streaming ?? true,
+    },
+    activity: {
+      files: [],
+      backgroundTasks: [],
+      skills: [],
+      delegationSources: [],
+      ...over.activity,
     },
     actions: over.actions ?? actions,
   }
@@ -315,5 +323,60 @@ describe("demandTranscriptNav", () => {
     releaseB()
     expect(demand(7)).toBe(0)
     expect(useTranscriptInsightsStore.getState().navDemand.has(7)).toBe(false)
+  })
+})
+
+describe("demandTranscriptActivity", () => {
+  const demand = (id: number) =>
+    useTranscriptInsightsStore.getState().activityDemand.get(id) ?? 0
+
+  it("counts every holder and releases each once", () => {
+    const releaseA = demandTranscriptActivity(7)
+    const releaseB = demandTranscriptActivity(7)
+    expect(demand(7)).toBe(2)
+    releaseA()
+    releaseA()
+    expect(demand(7)).toBe(1)
+    releaseB()
+    expect(demand(7)).toBe(0)
+    expect(useTranscriptInsightsStore.getState().activityDemand.has(7)).toBe(
+      false
+    )
+  })
+})
+
+describe("activity part isolation", () => {
+  it("keeps the nav part when only the activity's files change", () => {
+    const prev = insights()
+    const next = mergeTranscriptInsights(
+      prev,
+      insights({
+        activity: {
+          files: [
+            {
+              id: "t1:1:0",
+              path: "src/a.ts",
+              additions: 3,
+              deletions: 1,
+              diff: null,
+            },
+          ],
+          backgroundTasks: [],
+          skills: [],
+          delegationSources: [],
+        },
+      })
+    )
+    expect(next).not.toBe(prev)
+    expect(next.activity).not.toBe(prev.activity)
+    expect(next.activity.files).toHaveLength(1)
+    expect(next.nav).toBe(prev.nav)
+    expect(next.plan).toBe(prev.plan)
+  })
+
+  it("keeps the previous activity object when nothing in it changed", () => {
+    const prev = insights()
+    const next = mergeTranscriptInsights(prev, insights())
+    expect(next.activity).toBe(prev.activity)
   })
 })

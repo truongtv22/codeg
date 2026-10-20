@@ -16,7 +16,14 @@ import { useCallback, useSyncExternalStore } from "react"
 
 import type { DiffViewMode } from "@/lib/diff-view-mode-prefs"
 
-export type SessionDetailsSection = "plan" | "messageNav"
+export type SessionDetailsSection =
+  | "plan"
+  | "messageNav"
+  | "subagents"
+  | "live"
+  | "backgroundTasks"
+  | "files"
+  | "skills"
 
 const KEY_PREFIX = "workspace:session-details:"
 const SECTION_OPEN_KEY_PREFIX = `${KEY_PREFIX}open:`

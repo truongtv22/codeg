@@ -262,6 +262,7 @@ impl OpenCodeParser {
             summary,
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         })
     }
@@ -4377,5 +4378,28 @@ mod tests {
                     .join("models.json")
             )
         );
+    }
+
+    #[test]
+    fn opencode_sessions_carry_no_session_activity() {
+        use crate::parsers::AgentParser;
+
+        let t0: i64 = 1_790_612_421_000;
+        let mut fx = DbFixture::new(&V2_TABLES);
+        fx.v2_session("ses_main", None, None, t0, t0 + 1_000);
+        fx.v2_message(
+            "ses_main",
+            "msg_01",
+            4,
+            "user",
+            t0 + 10,
+            serde_json::json!({
+                "time": { "created": t0 + 10 },
+                "content": [{ "type": "text", "text": "hello" }]
+            }),
+        );
+        let (_dir, parser) = fx.build();
+        let detail = parser.get_conversation("ses_main").expect("detail");
+        assert!(detail.session_activity.is_none());
     }
 }

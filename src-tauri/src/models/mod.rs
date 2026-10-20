@@ -28,11 +28,12 @@ pub use canvas::{CanvasBoard, CanvasBoardSummary, CanvasMutation, CanvasNode, Ca
 #[allow(unused_imports)]
 pub use chat_channel::{ChannelStatusInfo, ChatChannelInfo, ChatChannelMessageLogInfo};
 pub use conversation::{
-    AgentConversationCount, AgentStats, ConversationBranchTag, ConversationDetail,
-    ConversationOutline, ConversationSummary, ConversationTagDetail, ConversationTurnsPage,
-    DbConversationDetail, DbConversationSummary, FolderInfo, ImportFolderOutcome, ImportResult,
-    ImportSelectedResult, ScanFolder, ScanResult, ScanSession, ScanSessionStatus,
-    SelectedSessionKey, SessionStats, SidebarData,
+    AgentConversationCount, AgentStats, BackgroundTaskInfo, ConversationBranchTag,
+    ConversationDetail, ConversationOutline, ConversationSummary, ConversationTagDetail,
+    ConversationTurnsPage, DbConversationDetail, DbConversationSummary, FolderInfo,
+    ImportFolderOutcome, ImportResult, ImportSelectedResult, ScanFolder, ScanResult,
+    ScanSession, ScanSessionStatus, SelectedSessionKey, SessionActivity, SessionStats,
+    SidebarData, SkillUse,
 };
 pub use folder::{
     FolderCommandInfo, FolderDetail, FolderGroupDetail, FolderHistoryEntry, OpenedTab,

@@ -1003,6 +1003,7 @@ impl AgentParser for KiroParser {
             summary,
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: Some(transcript_watermark),
         })
     }

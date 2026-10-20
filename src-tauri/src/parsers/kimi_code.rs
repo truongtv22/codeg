@@ -246,6 +246,7 @@ impl KimiCodeParser {
             summary,
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         }
     }

@@ -107,9 +107,12 @@ import {
 } from "@/components/message/message-nav-entries"
 import { useMessageNavJump } from "@/components/message/use-message-nav-jump"
 import { useConversationOutline } from "@/hooks/use-conversation-outline"
+import { extractSessionFilesGrouped } from "@/lib/session-files"
+import type { FileChangeStat } from "@/lib/session-files"
 import {
   publishTranscriptInsights,
   retractTranscriptInsights,
+  useTranscriptActivityDemanded,
   useTranscriptNavDemanded,
   type TranscriptInsights,
   type TranscriptInsightsActions,
@@ -445,6 +448,68 @@ const EMPTY_NAV_ENTRIES: MessageNavEntry[] = []
 
 // Stable empty reference for "the live reply has no plan".
 const EMPTY_PLAN_ENTRIES: PlanEntryInfo[] = []
+
+// Stable empty reference for "no files in the session yet" (activity tab).
+const EMPTY_ACTIVITY_FILES: FileChangeStat[] = []
+
+/**
+ * One row per file across the whole session: the per-message groups' files
+ * concatenated, same-path duplicates merged by summing their line counts and
+ * joining their diffs (same rule the navigator rows use). First occurrence
+ * order — the order the transcript introduced the files in.
+ */
+function mergeFileChangesFlat(
+  groups: ReturnType<typeof extractSessionFilesGrouped>
+): FileChangeStat[] {
+  const byPath = new Map<
+    string,
+    {
+      stat: FileChangeStat
+      additions: number
+      deletions: number
+      diffs: string[]
+    }
+  >()
+  const order: string[] = []
+  for (const group of groups) {
+    for (const file of group.files) {
+      const key = file.path
+      const acc = byPath.get(key)
+      if (acc) {
+        acc.additions += file.additions
+        acc.deletions += file.deletions
+        if (file.diff) acc.diffs.push(file.diff)
+      } else {
+        byPath.set(key, {
+          stat: file,
+          additions: file.additions,
+          deletions: file.deletions,
+          diffs: file.diff ? [file.diff] : [],
+        })
+        order.push(key)
+      }
+    }
+  }
+  return order.map((key) => {
+    const { stat, additions, deletions, diffs } = byPath.get(key)!
+    if (
+      additions === stat.additions &&
+      deletions === stat.deletions &&
+      (diffs.length === 0
+        ? stat.diff === null
+        : diffs.join("\n\n") === stat.diff)
+    ) {
+      return stat
+    }
+    return {
+      id: stat.id,
+      path: stat.path,
+      additions,
+      deletions,
+      diff: diffs.length > 0 ? diffs.join("\n\n") : null,
+    }
+  })
+}
 
 // A single turn's `sourceTurns` is just `[turn]`. Cache the wrapper per turn
 // object so an unchanged historical turn keeps a stable `sourceTurns` reference
@@ -1821,6 +1886,20 @@ export function MessageListView({
     loadedSubAgents,
   ])
 
+  // The activity tab's cumulative file list: one merged row per file the
+  // loaded turns touch. Only computed while the tab wants them — like the
+  // navigator rows, grouping walks every turn's tool calls.
+  const activityDemanded = useTranscriptActivityDemanded(
+    conversationId,
+    insightsInSidebar
+  )
+  const activityFiles = useMemo(() => {
+    if (!activityDemanded) return EMPTY_ACTIVITY_FILES
+    return mergeFileChangesFlat(
+      extractSessionFilesGrouped(timelineTurns.map((item) => item.turn))
+    )
+  }, [activityDemanded, timelineTurns])
+
   // The message the transcript is showing, which the navigator highlights:
   // the one at the top of the viewport (or the one whose reply is there), or
   // the latest once the view is at the end. Tracked only while the rows are
@@ -1882,6 +1961,26 @@ export function MessageListView({
       : null
   const navRevealingTurnId = navJump.revealingTurnId
   const replyStreaming = connStatus === "prompting"
+  // The Rust-parsed tallies ride on the detail; present for Claude only.
+  const parsedActivity = detail?.session_activity ?? null
+  // Every delegation source the loaded thread holds: the activity tab's
+  // sub-agent rows resolve through the same card model. Derived only while
+  // someone wants the activity parts.
+  const activitySubagents = useMemo(
+    () =>
+      activityDemanded
+        ? extractMessageDelegationSources(threadItems)
+        : undefined,
+    [activityDemanded, threadItems]
+  )
+  const allDelegationSources = useMemo<DelegationCardSource[]>(() => {
+    if (!activitySubagents) return EMPTY_DELEGATIONS
+    const all: DelegationCardSource[] = []
+    for (const sources of activitySubagents.byUserTurnId.values())
+      all.push(...sources)
+    all.unshift(...activitySubagents.leading)
+    return all.length > 0 ? all : EMPTY_DELEGATIONS
+  }, [activitySubagents])
   const transcriptInsights = useMemo<TranscriptInsights | null>(
     () =>
       insightsInSidebar
@@ -1894,6 +1993,12 @@ export function MessageListView({
               currentTurnId: currentNavTurnId,
             },
             plan: { entries: sidebarPlanEntries, streaming: replyStreaming },
+            activity: {
+              files: activityFiles,
+              backgroundTasks: parsedActivity?.background_tasks ?? [],
+              skills: parsedActivity?.skills ?? [],
+              delegationSources: allDelegationSources,
+            },
             actions: insightsActions,
           }
         : null,
@@ -1906,6 +2011,9 @@ export function MessageListView({
       currentNavTurnId,
       sidebarPlanEntries,
       replyStreaming,
+      activityFiles,
+      parsedActivity,
+      allDelegationSources,
       insightsActions,
     ]
   )

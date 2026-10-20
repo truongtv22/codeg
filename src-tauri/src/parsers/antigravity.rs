@@ -693,6 +693,7 @@ impl AgentParser for AntigravityParser {
             summary: self.summary_from(conversation_id, &parsed),
             turns,
             session_stats,
+            session_activity: None,
             transcript_watermark: None,
         })
     }

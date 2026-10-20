@@ -355,10 +355,39 @@ export interface MessageTurn {
   source_turn_id?: string | null
 }
 
+/** Một skill đã được phiên gọi qua tool `Skill`, tổng hợp từ transcript.
+ *  Mirror của Rust `SkillUse`. */
+export interface SessionSkillUse {
+  name: string
+  call_count: number
+  /** ISO timestamp lần gọi cuối cùng. */
+  last_used_at?: string | null
+}
+
+/** Một background task đã kết thúc (có task-notification chốt trạng thái),
+ *  tổng hợp từ transcript. Mirror của Rust `BackgroundTaskInfo`. */
+export interface SessionBackgroundTaskInfo {
+  task_id: string
+  name: string
+  /** "task" (Agent tool chạy nền) hoặc "shell" (Bash nền). */
+  task_type: string
+  state: string
+  last_tool_name?: string | null
+  output_file_path?: string | null
+}
+
+/** Hoạt động tổng hợp ở tầng Rust từ transcript — giữ nguyên khi phiên cũ
+ *  mở lại. Mirror của Rust `SessionActivity`. */
+export interface SessionActivity {
+  skills: SessionSkillUse[]
+  background_tasks: SessionBackgroundTaskInfo[]
+}
+
 export interface ConversationDetail {
   summary: ConversationSummary
   turns: MessageTurn[]
   session_stats?: SessionStats | null
+  session_activity?: SessionActivity | null
   /**
    * Byte length of the source transcript this parse consumed (Claude only;
    * absent elsewhere). Retires background-overlay turns whose
@@ -983,6 +1012,7 @@ export interface DbConversationDetail {
   summary: DbConversationSummary
   turns: MessageTurn[]
   session_stats?: SessionStats | null
+  session_activity?: SessionActivity | null
   /** See `ConversationDetail.transcript_watermark` (threaded through the DB
    *  fetch path from the same parser detail). */
   transcript_watermark?: number | null

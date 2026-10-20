@@ -2286,6 +2286,45 @@
       "copiedField": "تم نسخ {field}",
       "assistant": "المساعد"
     },
+    "activity": {
+      "tabLabel": "Hoạt động",
+      "live": {
+        "title": "Đang chạy",
+        "subagents": "{count, plural, one {# sub-agent đang chạy} other {# sub-agent đang chạy}}",
+        "stop": "Dừng"
+      },
+      "background": {
+        "title": "Tác vụ nền",
+        "state": {
+          "completed": "hoàn thành",
+          "failed": "thất bại",
+          "stopped": "đã dừng",
+          "canceled": "đã hủy",
+          "cancelled": "đã hủy",
+          "killed": "bị kết thúc",
+          "timeout": "hết giờ",
+          "timed_out": "hết giờ",
+          "error": "lỗi"
+        }
+      },
+      "skills": {
+        "title": "Skill đã dùng",
+        "calls": "{count, plural, one {# lần} other {# lần}}"
+      },
+      "subagents": {
+        "title": "Sub-agent"
+      },
+      "files": {
+        "title": "Tệp đã đổi",
+        "mode": {
+          "added": "Thêm",
+          "modified": "Sửa",
+          "deleted": "Xóa"
+        },
+        "showDiff": "إظهار الفرق",
+        "hideDiff": "إخفاء الفرق"
+      }
+    },
     "conversationCard": {
       "untitledConversation": "محادثة بدون عنوان",
       "newConversation": "محادثة جديدة",

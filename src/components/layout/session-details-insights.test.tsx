@@ -77,6 +77,12 @@ function insights(
       ...over.nav,
     },
     plan: { entries: [], streaming: false, ...over.plan },
+    activity: {
+      files: [],
+      backgroundTasks: [],
+      skills: [],
+      delegationSources: [],
+    },
     actions: over.actions ?? makeActions(),
   }
 }

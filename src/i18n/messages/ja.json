@@ -2286,6 +2286,45 @@
       "copiedField": "{field}をコピーしました",
       "assistant": "アシスタント"
     },
+    "activity": {
+      "tabLabel": "アクティビティ",
+      "live": {
+        "title": "実行中",
+        "subagents": "{count} 個のサブエージェントが実行中",
+        "stop": "停止"
+      },
+      "background": {
+        "title": "バックグラウンドタスク",
+        "state": {
+          "completed": "完了",
+          "failed": "失敗",
+          "stopped": "停止",
+          "canceled": "キャンセル",
+          "cancelled": "キャンセル",
+          "killed": "強制終了",
+          "timeout": "タイムアウト",
+          "timed_out": "タイムアウト",
+          "error": "エラー"
+        }
+      },
+      "skills": {
+        "title": "使用スキル",
+        "calls": "{count} 回"
+      },
+      "subagents": {
+        "title": "サブエージェント"
+      },
+      "files": {
+        "title": "変更ファイル",
+        "mode": {
+          "added": "追加",
+          "modified": "変更",
+          "deleted": "削除"
+        },
+        "showDiff": "差分を表示",
+        "hideDiff": "差分を隠す"
+      }
+    },
     "conversationCard": {
       "untitledConversation": "無題の会話",
       "newConversation": "新しい会話",

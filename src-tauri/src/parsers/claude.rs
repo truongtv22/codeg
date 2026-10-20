@@ -57,6 +57,58 @@ struct BackgroundNotification {
     /// The notification says the task will notify again (see
     /// [`task_notification_is_interim`]).
     interim: bool,
+    /// The notification's `<output-file>` when it carried one.
+    output_file_path: Option<String>,
+}
+
+/// Skill invocations of one session, grouped by name in first-use order —
+/// the order the transcript introduced them in, which is the useful one for
+/// "what did this session reach for".
+#[derive(Default)]
+struct SkillTally {
+    names: Vec<String>,
+    counts: std::collections::HashMap<String, u32>,
+    last_used: std::collections::HashMap<String, DateTime<Utc>>,
+}
+
+impl SkillTally {
+    /// Record one `Skill` tool call: `input.skill` (current CLIs) or
+    /// `input.name` (older spellings), preferred in that order.
+    fn record(&mut self, name: Option<String>, at: Option<DateTime<Utc>>) {
+        let Some(name) = name.filter(|n| !n.trim().is_empty()) else {
+            return;
+        };
+        let name = name.trim().to_string();
+        if !self.counts.contains_key(&name) {
+            self.names.push(name.clone());
+        }
+        *self.counts.entry(name.clone()).or_insert(0) += 1;
+        if let Some(at) = at {
+            let slot = self.last_used.entry(name).or_insert(at);
+            if at > *slot {
+                *slot = at;
+            }
+        }
+    }
+}
+
+/// The skill a `Skill` tool call's input names, if it names one.
+fn skill_name_from_input(input: &serde_json::Value) -> Option<String> {
+    for key in ["skill", "name", "command"] {
+        if let Some(name) = input.get(key).and_then(|v| v.as_str()) {
+            // `command` on this tool is the skill's invocation; anything with
+            // a slash prefix is a command path, not a skill name.
+            return Some(name.to_string());
+        }
+    }
+    None
+}
+
+/// Whether an assistant `tool_use` record's block invokes the `Skill` tool —
+/// the tool_use items the `message.content` ARRAY shape carries.
+fn is_skill_tool_block(item: &serde_json::Value) -> bool {
+    item.get("type").and_then(|t| t.as_str()) == Some("tool_use")
+        && item.get("name").and_then(|n| n.as_str()) == Some("Skill")
 }
 
 /// Record one `<task-notification>` payload under its task id. The same id can
@@ -85,6 +137,7 @@ fn record_task_notification(
                 )
             }),
             interim: task_notification_is_interim(raw),
+            output_file_path: capture_tag(task_notification_output_file_regex(), raw),
         },
     );
 }
@@ -208,6 +261,14 @@ pub(crate) fn task_notification_tool_use_id_regex() -> &'static Regex {
 pub(crate) fn task_notification_result_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| Regex::new(r"(?s)<result>(.*?)</result>").unwrap())
+}
+
+/// A background task's output log path, carried by its `<task-notification>`
+/// as `<output-file>`. Used by the Activity tab's "open output" affordance;
+/// absent on most notifications.
+fn task_notification_output_file_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"(?s)<output-file>(.*?)</output-file>").unwrap())
 }
 
 /// First capture group of `re` in `text`, trimmed; `None` when absent/empty.
@@ -1817,6 +1878,14 @@ pub(crate) struct ClaudeRecordAccumulator {
     /// task id → LATEST `<task-notification>` payload (the same id can notify
     /// more than once — a resumed sub-agent re-notifies; last wins).
     background_notifications: std::collections::HashMap<String, BackgroundNotification>,
+    /// Skill invocations seen so far, keyed by name, in first-use order (see
+    /// [`SkillTally`]).
+    skill_tally: SkillTally,
+    /// task id → the `<summary>`-style name the LAUNCH record gives it (the
+    /// async ack's `description`, a background shell's `description`). Joins
+    /// with `background_notifications` in [`Self::session_activity`], which
+    /// only lists tasks the transcript saw settle.
+    background_task_names: std::collections::HashMap<String, String>,
     /// When each turn Claude Code opened ON ITS OWN began: the
     /// `<task-notification>` user record a background task settles with while
     /// the CLI is idle, which the CLI answers straight away. That record never
@@ -1888,6 +1957,8 @@ impl ClaudeRecordAccumulator {
             open_goal: None,
             background_acks: std::collections::HashMap::new(),
             background_notifications: std::collections::HashMap::new(),
+            skill_tally: SkillTally::default(),
+            background_task_names: std::collections::HashMap::new(),
             turn_starts: Vec::new(),
             usage_owner_by_message_id: std::collections::HashMap::new(),
             pending_assistant_message_id: None,
@@ -2010,6 +2081,8 @@ impl ClaudeRecordAccumulator {
             open_goal,
             background_acks,
             background_notifications,
+            skill_tally,
+            background_task_names,
             turn_starts,
             usage_owner_by_message_id,
             pending_assistant_message_id,
@@ -2289,6 +2362,16 @@ impl ClaudeRecordAccumulator {
                             .and_then(|v| v.as_str())
                             .filter(|s| !s.is_empty())
                         {
+                            // The launch's own description is the row name
+                            // when the later notification carries no summary.
+                            if let Some(description) = tur
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .filter(|s| !s.trim().is_empty())
+                            {
+                                background_task_names
+                                    .insert(task_id.to_string(), description.to_string());
+                            }
                             if let Some(ack_tool_use_id) =
                                 content.iter().find_map(|b| match b {
                                     ContentBlock::ToolResult {
@@ -2380,6 +2463,24 @@ impl ClaudeRecordAccumulator {
                 }
 
                 let content = extract_assistant_content(&value);
+                // Activity-tab tallies read off the raw record, before the
+                // blocks are moved into `messages`: the `Skill` tool call's
+                // input names the skill, in first-use order.
+                let timestamp_utc = parse_timestamp(&value);
+                if let Some(content_value) =
+                    value.get("message").and_then(|m| m.get("content"))
+                {
+                    if let Some(items) = content_value.as_array() {
+                        for item in items {
+                            if is_skill_tool_block(item) {
+                                let name = item
+                                    .get("input")
+                                    .and_then(skill_name_from_input);
+                                skill_tally.record(name, timestamp_utc);
+                            }
+                        }
+                    }
+                }
                 let message_id = value
                     .get("message")
                     .and_then(|m| m.get("id"))
@@ -2850,6 +2951,65 @@ impl ClaudeRecordAccumulator {
         self.apply_background_lifecycle(&mut messages);
         self.messages = messages;
     }
+
+    /// The Activity tab's cold-parse data: skills invoked and background
+    /// tasks the transcript saw settle. Called once at the end of a full
+    /// detail parse, after every record has been fed.
+    ///
+    /// A task is listed only when its final notification was read: the
+    /// transcript cannot distinguish a still-running task from one whose CLI
+    /// died, and claiming "running" from silence is the zombie trap — still
+    /// running is the live connection's answer, not the transcript's. The
+    /// terminal-state vocabulary follows the watcher's
+    /// `is_terminal_task_status` (the CLI's own spellings), with the launch
+    /// record's description as the row name when the notification carries no
+    /// summary.
+    pub(crate) fn session_activity(&self) -> SessionActivity {
+        SessionActivity {
+            skills: self
+                .skill_tally
+                .names
+                .iter()
+                .map(|name| SkillUse {
+                    name: name.clone(),
+                    call_count: self.skill_tally.counts.get(name).copied().unwrap_or(0),
+                    last_used_at: self.skill_tally.last_used.get(name).copied(),
+                })
+                .collect(),
+            background_tasks: self
+                .background_notifications
+                .iter()
+                .filter(|(_, notification)| {
+                    matches!(
+                        notification.status.as_str(),
+                        "completed" | "failed" | "stopped" | "canceled" | "cancelled"
+                            | "killed" | "timeout" | "timed_out" | "error"
+                    )
+                })
+                .filter(|(_, notification)| !notification.interim)
+                .map(|(task_id, notification)| BackgroundTaskInfo {
+                    task_id: task_id.clone(),
+                    name: notification
+                        .summary
+                        .clone()
+                        .or_else(|| self.background_task_names.get(task_id).cloned())
+                        .unwrap_or_else(|| task_id.clone()),
+                    // Only tasks with a recorded async-launch ack are the
+                    // `Agent` tool's background form; a notification whose
+                    // launch never left a `toolUseResult` is a background
+                    // shell (the `Bash` tool's).
+                    task_type: if self.background_acks.values().any(|id| id == task_id) {
+                        "task".to_string()
+                    } else {
+                        "shell".to_string()
+                    },
+                    state: notification.status.clone(),
+                    last_tool_name: None,
+                    output_file_path: notification.output_file_path.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl ClaudeParser {
@@ -2877,6 +3037,7 @@ impl ClaudeParser {
             acc.feed_line(line);
         }
         acc.finalize_background_lifecycle();
+        let session_activity = acc.session_activity();
         let turn_starts = acc.chronological_turn_starts();
 
         let ClaudeRecordAccumulator {
@@ -2891,6 +3052,10 @@ impl ClaudeParser {
             last_timestamp,
             ..
         } = acc;
+
+        let session_activity =
+            (session_activity.skills.len() + session_activity.background_tasks.len() > 0)
+                .then_some(session_activity);
 
         let folder_path = cwd.clone();
         let folder_name = folder_path.as_ref().map(|p| folder_name_from_path(p));
@@ -2943,6 +3108,7 @@ impl ClaudeParser {
             summary,
             turns,
             session_stats,
+            session_activity,
             transcript_watermark: Some(transcript_watermark),
         })
     }
@@ -9341,4 +9507,91 @@ mod tests {
             PathBuf::from("/relocated/claude").join("projects")
         );
     }
+
+    #[test]
+    fn skill_calls_tally_by_name_with_first_use_order() {
+        // Same skill twice (counts merge, last_used wins), another once. The
+        // names come back in the order the transcript introduced them.
+        let lines = vec![
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:00.000Z","uuid":"u1","cwd":"/Users/test/proj","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:05.000Z","uuid":"a1","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t1","name":"Skill","input":{"skill":"code-review"}}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:10.000Z","uuid":"a2","message":{"id":"msg_02","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t2","name":"Skill","input":{"name":"code-review"}}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:15.000Z","uuid":"a3","message":{"id":"msg_03","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t3","name":"Skill","input":{"skill":"debug"}}]}}"#.to_string(),
+        ];
+        let detail = parse_lines("sess-skills", &lines);
+        let activity = detail.session_activity.expect("activity present");
+        assert!(activity.background_tasks.is_empty());
+        let skills: Vec<(String, u32)> = activity
+            .skills
+            .iter()
+            .map(|s| (s.name.clone(), s.call_count))
+            .collect();
+        assert_eq!(skills, vec![("code-review".into(), 2), ("debug".into(), 1)]);
+        assert_eq!(
+            activity.skills[0].last_used_at.map(|t| t.to_rfc3339()),
+            Some("2026-09-05T03:40:10+00:00".to_string())
+        );
+        assert_eq!(
+            activity.skills[1].last_used_at.map(|t| t.to_rfc3339()),
+            Some("2026-09-05T03:40:15+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn settled_background_tasks_read_launch_and_notification_records() {
+        // A background `Agent` launch (toolUseResult ack names the task id and
+        // description) settled `completed` via a between-turns notification,
+        // plus a background shell settled `failed` mid-turn. One launch with
+        // NO notification stays out — the transcript cannot tell whether the
+        // CLI died first (the zombie-"running" trap).
+        let lines = vec![
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:00.000Z","uuid":"u1","cwd":"/Users/test/proj","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:05.000Z","uuid":"a1","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t1","name":"Agent","input":{"subagent_type":"Explore","description":"scan the parsers"}}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:06.000Z","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ack"}]},"toolUseResult":{"status":"async_launched","agentId":"agent-1","description":"scan the parsers"}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:07.000Z","uuid":"a2","message":{"id":"msg_02","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t2","name":"Bash","input":{"command":"sleep 100","run_in_background":true}}]}}"#.to_string(),
+            // A background shell's launch leaves no async ack toolUseResult —
+            // that is the Agent tool's; the shell id is plain tool output.
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:08.000Z","uuid":"u3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"shell id bg-9"}]}}"#.to_string(),
+            // The agent task settles between turns; the shell settles
+            // mid-turn as a queued_command attachment.
+            r#"{"type":"user","timestamp":"2026-09-05T03:41:00.000Z","uuid":"u4","message":{"role":"user","content":"<task-notification><task-id>agent-1</task-id><status>completed</status><summary>scan the parsers</summary><note>A task-notification fires each time this agent stops.</note><result>done</result></task-notification>"}}"#.to_string(),
+            r#"{"type":"attachment","timestamp":"2026-09-05T03:41:30.000Z","uuid":"u5","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><task-id>bg-9</task-id><status>failed</status><summary>sleep exploded</summary><output-file>/tmp/bg-9.out</output-file></task-notification>"}}"#.to_string(),
+            // A second launch that never notifies — must not appear.
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:42:00.000Z","uuid":"a3","message":{"id":"msg_03","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t3","name":"Agent","input":{"description":"never settles"}}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:42:01.000Z","uuid":"u6","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t3","content":"ack"}]},"toolUseResult":{"status":"async_launched","agentId":"agent-2","description":"never settles"}}"#.to_string(),
+        ];
+        let detail = parse_lines("sess-bgtasks", &lines);
+        let activity = detail.session_activity.expect("activity present");
+        let by_id: std::collections::HashMap<&str, &BackgroundTaskInfo> = activity
+            .background_tasks
+            .iter()
+            .map(|t| (t.task_id.as_str(), t))
+            .collect();
+        assert_eq!(by_id.len(), 2, "no-notification launch stays out");
+        let agent_task = by_id.get("agent-1").unwrap();
+        assert_eq!(agent_task.name, "scan the parsers");
+        assert_eq!(agent_task.task_type, "task");
+        assert_eq!(agent_task.state, "completed");
+        let shell = by_id.get("bg-9").unwrap();
+        assert_eq!(shell.name, "sleep exploded");
+        assert_eq!(shell.task_type, "shell");
+        assert_eq!(shell.state, "failed");
+        assert_eq!(shell.output_file_path.as_deref(), Some("/tmp/bg-9.out"));
+        // A launch ack means the summary falls back to the description; give
+        // the notification-summary path its own check on the task-type split.
+        assert!(activity.skills.is_empty());
+    }
+
+    #[test]
+    fn interim_and_running_notifications_do_not_list_background_tasks() {
+        // An interim notification says the task will report again — it is
+        // still alive, and a `running` status is not terminal either.
+        let lines = vec![
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:00.000Z","uuid":"u1","cwd":"/Users/test/proj","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:30.000Z","uuid":"u2","message":{"role":"user","content":"<task-notification><task-id>agent-1</task-id><status>completed</status><summary>waiting on its own background work</summary><note>This agent stopped with background work of its own still running. It may resume on its own when that work completes or reports, and the same task-id notifies again if it does; the result below may be interim.</note><result>partial</result></task-notification>"}}"#.to_string(),
+        ];
+        let detail = parse_lines("sess-interim-bgtask", &lines);
+        assert!(detail.session_activity.is_none());
+    }
 }
+

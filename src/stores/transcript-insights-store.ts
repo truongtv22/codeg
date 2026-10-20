@@ -3,7 +3,11 @@ import { create } from "zustand"
 import type { MessageNavEntry } from "@/components/message/conversation-message-nav"
 import type { DelegationCardSource } from "@/hooks/use-delegation-card-model"
 import type { FileChangeStat } from "@/lib/session-files"
-import type { PlanEntryInfo } from "@/lib/types"
+import type {
+  PlanEntryInfo,
+  SessionBackgroundTaskInfo,
+  SessionSkillUse,
+} from "@/lib/types"
 
 /**
  * What a conversation's transcript knows about itself that the Session Details
@@ -48,6 +52,19 @@ export interface TranscriptPlanInsights {
   streaming: boolean
 }
 
+export interface TranscriptActivityInsights {
+  /** Cumulative files the session touched, re-derived from the loaded turns
+   *  (see `extractSessionFiles`). */
+  files: readonly FileChangeStat[]
+  /** Settled background tasks parsed in Rust from the transcript. */
+  backgroundTasks: readonly SessionBackgroundTaskInfo[]
+  /** Skill invocations tallied in Rust from the transcript. */
+  skills: readonly SessionSkillUse[]
+  /** Every delegation source the loaded thread holds — the raw inputs the
+   *  activity tab's sub-agent rows resolve through the card model. */
+  delegationSources: readonly DelegationCardSource[]
+}
+
 export interface TranscriptInsightsActions {
   /** Scroll the transcript to a message, paging it in first when it sits
    *  above the loaded window. */
@@ -59,6 +76,7 @@ export interface TranscriptInsightsActions {
 export interface TranscriptInsights {
   nav: TranscriptNavInsights
   plan: TranscriptPlanInsights
+  activity: TranscriptActivityInsights
   /** Must keep its identity for as long as its publisher lives: a new object
    *  counts as a change. */
   actions: TranscriptInsightsActions
@@ -76,12 +94,16 @@ interface TranscriptInsightsState {
   byConversationId: ReadonlyMap<number, PublishedInsights>
   /** How many mounted surfaces currently show a conversation's navigator rows. */
   navDemand: ReadonlyMap<number, number>
+  /** How many mounted surfaces currently show a conversation's activity file
+   *  list. */
+  activityDemand: ReadonlyMap<number, number>
 }
 
 export const useTranscriptInsightsStore = create<TranscriptInsightsState>(
   () => ({
     byConversationId: new Map(),
     navDemand: new Map(),
+    activityDemand: new Map(),
   })
 )
 
@@ -280,6 +302,60 @@ function mergePlan(
   return { ...next, entries }
 }
 
+function sameSessionSkillUse(a: SessionSkillUse, b: SessionSkillUse): boolean {
+  return (
+    a.name === b.name &&
+    a.call_count === b.call_count &&
+    a.last_used_at === b.last_used_at
+  )
+}
+
+function sameBackgroundTask(
+  a: SessionBackgroundTaskInfo,
+  b: SessionBackgroundTaskInfo
+): boolean {
+  return (
+    a.task_id === b.task_id &&
+    a.name === b.name &&
+    a.task_type === b.task_type &&
+    a.state === b.state &&
+    a.last_tool_name === b.last_tool_name &&
+    a.output_file_path === b.output_file_path
+  )
+}
+
+function mergeActivity(
+  prev: TranscriptActivityInsights,
+  next: TranscriptActivityInsights
+): TranscriptActivityInsights {
+  const files = mergeKeyedList(prev.files, next.files, (f) => f.id, sameFile)
+  const backgroundTasks = mergePositionalList(
+    prev.backgroundTasks,
+    next.backgroundTasks,
+    sameBackgroundTask
+  )
+  const skills = mergePositionalList(
+    prev.skills,
+    next.skills,
+    sameSessionSkillUse
+  )
+  const delegationSources = mergeKeyedList(
+    prev.delegationSources,
+    next.delegationSources,
+    (source) => source.parentToolUseId,
+    sameDelegationSource
+  )
+  if (
+    files === prev.files &&
+    backgroundTasks === prev.backgroundTasks &&
+    skills === prev.skills &&
+    delegationSources === prev.delegationSources
+  ) {
+    return prev
+  }
+  return { files, backgroundTasks, skills, delegationSources }
+}
+
 /**
  * `next` with every part that equals `prev`'s part replaced by `prev`'s, and
  * `prev` itself when nothing changed — so a reader that selects one part
@@ -292,10 +368,16 @@ export function mergeTranscriptInsights(
   if (prev == null || prev === next) return next
   const nav = mergeNav(prev.nav, next.nav)
   const plan = mergePlan(prev.plan, next.plan)
-  if (nav === prev.nav && plan === prev.plan && next.actions === prev.actions) {
+  const activity = mergeActivity(prev.activity, next.activity)
+  if (
+    nav === prev.nav &&
+    plan === prev.plan &&
+    activity === prev.activity &&
+    next.actions === prev.actions
+  ) {
     return prev
   }
-  return { nav, plan, actions: next.actions }
+  return { nav, plan, activity, actions: next.actions }
 }
 
 /** Publish (or update) a conversation's insights. The latest publisher owns
@@ -359,6 +441,38 @@ export function useTranscriptNavDemanded(
 ): boolean {
   return useTranscriptInsightsStore(
     (state) => enabled && (state.navDemand.get(conversationId) ?? 0) > 0
+  )
+}
+
+/**
+ * Ask for a conversation's session files list (the activity tab's Files
+ * Changes). Same ref-counted pattern as `demandTranscriptNav`.
+ */
+export function demandTranscriptActivity(conversationId: number): () => void {
+  const adjust = (delta: number) =>
+    useTranscriptInsightsStore.setState((state) => {
+      const count = (state.activityDemand.get(conversationId) ?? 0) + delta
+      const activityDemand = new Map(state.activityDemand)
+      if (count > 0) activityDemand.set(conversationId, count)
+      else activityDemand.delete(conversationId)
+      return { activityDemand }
+    })
+  adjust(1)
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    adjust(-1)
+  }
+}
+
+/** Whether a surface currently wants this conversation's activity file list. */
+export function useTranscriptActivityDemanded(
+  conversationId: number,
+  enabled: boolean
+): boolean {
+  return useTranscriptInsightsStore(
+    (state) => enabled && (state.activityDemand.get(conversationId) ?? 0) > 0
   )
 }
 

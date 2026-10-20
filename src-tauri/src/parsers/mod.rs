@@ -1880,6 +1880,7 @@ mod route_sanitizer_tests {
                 summary: self.summary.clone(),
                 turns: self.turns.clone(),
                 session_stats: None,
+                session_activity: None,
                 transcript_watermark: None,
             })
         }
