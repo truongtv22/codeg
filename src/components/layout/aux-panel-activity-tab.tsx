@@ -5,10 +5,7 @@ import { useSyncExternalStore } from "react"
 
 import { useAuxPanelContext } from "@/contexts/aux-panel-context"
 import { useTabStore } from "@/contexts/tab-context"
-import {
-  useOptionalConnectionStore,
-  type ConnectionState,
-} from "@/contexts/acp-connections-context"
+import { useOptionalConnectionStore } from "@/contexts/acp-connections-context"
 import {
   demandTranscriptActivity,
   useTranscriptInsightsPart,
@@ -151,7 +148,3 @@ function useActivityFiles(
   const activity = useTranscriptInsightsPart(conversationId, (i) => i.activity)
   return activity?.files ?? []
 }
-
-// Reference keep: the connection shape the tab reads (revisit when the tab
-// grows per-connection sections).
-export type { ConnectionState }

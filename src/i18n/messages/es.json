@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "Actividad",
+      "empty": "Nada todavía",
       "live": {
         "title": "En vivo",
         "subagents": "{count, plural, one {# subagente en ejecución} other {# subagentes en ejecución}}",

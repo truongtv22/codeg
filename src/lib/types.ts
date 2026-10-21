@@ -372,7 +372,10 @@ export interface SessionBackgroundTaskInfo {
   /** "task" (Agent tool chạy nền) hoặc "shell" (Bash nền). */
   task_type: string
   state: string
-  last_tool_name?: string | null
+  /** Lệnh/prompt đã chạy (từ tool call khởi tạo), nếu transcript còn giữ. */
+  command?: string | null
+  /** Trích kết quả từ task-notification, cho phần chi tiết mở rộng. */
+  result_summary?: string | null
   output_file_path?: string | null
 }
 

@@ -84,17 +84,19 @@ const FOLDER_TAB_LABEL_KEY: Record<
 }
 
 /** What the tab switchers list while the folder tabs are hidden. */
-const SESSION_DETAILS_ONLY: AuxTabOrder = ["session_details"]
+const SESSION_DETAILS_ONLY: AuxTabOrder = ["session_details", "activity"]
 
 /**
  * Decide which aux-panel tabs are available and which to actually show.
  *
  * The folder-scoped tabs (files/changes/commits, and the project's automations,
  * tasks, issues and pull requests) only make sense with a real folder
- * workspace open, so chat sessions and the folderless state collapse to just
- * the Session Details tab. `effectiveTab` keeps the rendered selection
- * valid even when the stored `activeTab` is a now-hidden folder tab, avoiding a
- * one-frame flash before the reconciling effect corrects the stored value.
+ * workspace open, so chat sessions and the folderless state collapse to the
+ * session's own tabs (Session Details and Activity — the Activity tab reads
+ * the transcript and the live connection, no folder needed). `effectiveTab`
+ * keeps the rendered selection valid even when the stored `activeTab` is a
+ * now-hidden folder tab, avoiding a one-frame flash before the reconciling
+ * effect corrects the stored value.
  */
 export function resolveAuxTabView(
   activeTab: AuxPanelTab,
@@ -104,7 +106,10 @@ export function resolveAuxTabView(
   const showFolderTabs = activeFolderId != null && !isChatMode
   return {
     showFolderTabs,
-    effectiveTab: showFolderTabs ? activeTab : "session_details",
+    effectiveTab:
+      showFolderTabs || activeTab === "activity"
+        ? activeTab
+        : "session_details",
   }
 }
 
@@ -152,7 +157,11 @@ export function AuxPanel() {
   // chat session), so other consumers of `activeTab` stay in sync with what's
   // shown. Done in an effect — never a render-time setState on the provider.
   useEffect(() => {
-    if (!showFolderTabs && activeTab !== "session_details") {
+    if (
+      !showFolderTabs &&
+      activeTab !== "session_details" &&
+      activeTab !== "activity"
+    ) {
       setActiveTab("session_details")
     }
   }, [showFolderTabs, activeTab, setActiveTab])

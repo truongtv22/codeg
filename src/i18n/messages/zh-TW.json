@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "活動",
+      "empty": "暫無內容",
       "live": {
         "title": "進行中",
         "subagents": "{count} 個子智能體正在執行",

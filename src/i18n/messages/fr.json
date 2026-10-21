@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "Activité",
+      "empty": "Rien pour l'instant",
       "live": {
         "title": "En direct",
         "subagents": "{count, plural, one {# sous-agent en cours} other {# sous-agents en cours}}",

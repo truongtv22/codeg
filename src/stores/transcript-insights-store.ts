@@ -319,7 +319,8 @@ function sameBackgroundTask(
     a.name === b.name &&
     a.task_type === b.task_type &&
     a.state === b.state &&
-    a.last_tool_name === b.last_tool_name &&
+    a.command === b.command &&
+    a.result_summary === b.result_summary &&
     a.output_file_path === b.output_file_path
   )
 }

@@ -171,10 +171,15 @@ pub struct BackgroundTaskInfo {
     /// Final notification status: `completed` | `failed` | `stopped` (plus the
     /// rarer terminal spellings the CLI writes).
     pub state: String,
-    /// Reserved for the task's last tool call; no transcript source today,
-    /// always `None` (the UI hides it).
+    /// The launching tool call's command — the background shell's command
+    /// line, or the background agent's prompt — when the transcript carries
+    /// the launch input.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_tool_name: Option<String>,
+    pub command: Option<String>,
+    /// A short excerpt of the notification's result (what the task produced),
+    /// for the row's expandable detail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_summary: Option<String>,
     /// The task's `<output-file>` when its notification carried one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_file_path: Option<String>,

@@ -1,23 +1,41 @@
 /**
- * The activity tab's Files Changes section: a row per cumulative file, the
- * A/M/R chip, and the lazy per-file diff expand — the diff text rides in with
- * the stat (built once when the transcript grouped its turns), so expanding
- * only mounts the renderer, and a deleted file (nothing to diff) has no
- * expand control at all.
+ * The activity tab's Files Changes section: a row per cumulative file — the
+ * A/M/R chip, the file NAME with its folder path below (relative to the open
+ * folder, like the message navigation's file rows), the green/red tallies,
+ * and the lazy per-file diff expand in the session's diff layout (inline or
+ * side by side). The diff text rides in with the stat (built once when the
+ * transcript grouped its turns), so expanding only mounts the renderer, and a
+ * deleted file (nothing to diff) has no expand control at all.
  */
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { NextIntlClientProvider } from "next-intl"
-import { describe, expect, it, vi } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import enMessages from "@/i18n/messages/en.json"
 import type { FileChangeStat } from "@/lib/session-files"
 
 import { ActivityFilesSection } from "./aux-panel-activity-files-section"
 
+const scene = vi.hoisted(() => ({ view: "unified" as "unified" | "split" }))
+
 vi.mock("@/hooks/use-open-file-target", () => ({
   useOpenFileTarget: () => vi.fn(async () => {}),
 }))
+vi.mock("@/contexts/active-folder-context", () => ({
+  useActiveFolder: () => ({ activeFolder: { path: "/repo" } }),
+}))
+vi.mock("@/lib/session-details-prefs", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("@/lib/session-details-prefs")>()
+  return {
+    ...actual,
+    useSessionDetailsDiffView: () => [
+      scene.view,
+      (v: "unified" | "split") => (scene.view = v),
+    ],
+  }
+})
 
 function stat(over: Partial<FileChangeStat> & { id: string }): FileChangeStat {
   return {
@@ -46,10 +64,30 @@ const DIFF = `diff --git a/src/a.ts b/src/a.ts
  context`
 
 describe("ActivityFilesSection", () => {
+  beforeEach(() => {
+    scene.view = "unified"
+  })
+
   it("renders no diff and no expand control while collapsed", () => {
     renderSection([stat({ id: "f1", path: "src/a.ts", diff: DIFF })])
     expect(screen.getByTitle("src/a.ts")).toBeVisible()
     expect(screen.queryByText(/new line/)).not.toBeInTheDocument()
+  })
+
+  it("shows the file name with its folder path relative to the open folder", () => {
+    renderSection([stat({ id: "f1", path: "/repo/src/deep/a.ts", diff: DIFF })])
+    // Name first, the folders it lives under beneath it, both relative to
+    // the open folder /repo.
+    expect(screen.getByText("a.ts")).toBeVisible()
+    expect(screen.getByText("src/deep")).toBeVisible()
+    expect(screen.queryByText("/repo/src/deep/a.ts")).not.toBeInTheDocument()
+  })
+
+  it("shows the green/red line counts", () => {
+    renderSection([stat({ id: "f1", path: "src/a.ts", diff: DIFF })])
+    expect(screen.getByText("+1")).toBeVisible()
+    // A zero deletion is left out.
+    expect(screen.queryByText("−0")).not.toBeInTheDocument()
   })
 
   it("expands the file's diff on first click, collapses on the second", async () => {

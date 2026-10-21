@@ -233,6 +233,12 @@ describe("resolveAuxTabView", () => {
       showFolderTabs: false,
       effectiveTab: "session_details",
     })
+    // The Activity tab reads the transcript and the live connection — no
+    // folder needed — so it survives the collapse.
+    expect(resolveAuxTabView("activity", 1, true)).toEqual({
+      showFolderTabs: false,
+      effectiveTab: "activity",
+    })
   })
 
   it("collapses to Session Details when no folder is open", () => {
@@ -561,9 +567,10 @@ describe("AuxPanel", () => {
       "Session Details"
     )
     // display:none drops the lone trigger out of the tab order, while it stays
-    // in the DOM for the panel's aria-labelledby.
+    // in the DOM for the panel's aria-labelledby. Activity rides along even
+    // here: it applies to every conversation, git folder or not.
     expect(rail()).toHaveClass("hidden")
-    expect(railTabs()).toEqual(["Session Details"])
+    expect(railTabs()).toEqual(["Session Details", "Activity"])
     expect(
       screen.getByRole("tabpanel", { name: "Session Details" })
     ).toBeInTheDocument()

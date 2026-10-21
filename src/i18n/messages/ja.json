@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "アクティビティ",
+      "empty": "まだありません",
       "live": {
         "title": "実行中",
         "subagents": "{count} 個のサブエージェントが実行中",

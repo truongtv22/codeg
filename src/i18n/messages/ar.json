@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "Hoạt động",
+      "empty": "لا شيء بعد",
       "live": {
         "title": "Đang chạy",
         "subagents": "{count, plural, one {# sub-agent đang chạy} other {# sub-agent đang chạy}}",

@@ -51,6 +51,10 @@ vi.mock("@/lib/api", () => ({
 vi.mock("@/hooks/use-open-file-target", () => ({
   useOpenFileTarget: () => vi.fn(async () => {}),
 }))
+// The files rows relativize their paths against the open folder; none here.
+vi.mock("@/contexts/active-folder-context", () => ({
+  useActiveFolder: () => ({ activeFolder: null }),
+}))
 
 // No provider in this test: the tab's connection lookup reads the optional
 // store, gets null, and the live section just renders no rows.
@@ -108,10 +112,13 @@ describe("ActivityTab", () => {
 
   it("renders an empty panel with no published activity", () => {
     renderTab()
-    // Nothing settled or live: the Live section (total 0) renders nothing.
-    expect(screen.queryByText("Subagents")).not.toBeInTheDocument()
-    expect(screen.queryByText("Background tasks")).not.toBeInTheDocument()
-    expect(screen.queryByText("Skills used")).not.toBeInTheDocument()
+    // The sections always show their titles; empty ones say so.
+    expect(screen.getByText("Live")).toBeVisible()
+    expect(screen.getByText("Subagents")).toBeVisible()
+    expect(screen.getByText("Background tasks")).toBeVisible()
+    expect(screen.getByText("Skills used")).toBeVisible()
+    expect(screen.getByText("Files changed")).toBeVisible()
+    expect(screen.getAllByText("Nothing yet").length).toBe(5)
   })
 
   it("lists a settled sub-agent row from the published delegation sources and opens it in the viewer", async () => {
@@ -148,7 +155,8 @@ describe("ActivityTab", () => {
     retractTranscriptInsights(1, "t")
   })
 
-  it("shows the Rust-parsed background tasks and skills, and no files section while nothing published", () => {
+  it("shows the Rust-parsed background tasks and skills, and no files section while nothing published", async () => {
+    const user = userEvent.setup()
     publishTranscriptInsights(1, "t", {
       nav: {
         count: 0,
@@ -166,6 +174,8 @@ describe("ActivityTab", () => {
             name: "sleep 120",
             task_type: "shell",
             state: "failed",
+            command: "sleep 120 && exit 1",
+            result_summary: "exited with code 1",
           },
         ],
         skills: [{ name: "code-review", call_count: 2, last_used_at: null }],
@@ -180,7 +190,12 @@ describe("ActivityTab", () => {
     expect(screen.getByText("Skills used")).toBeVisible()
     expect(screen.getByText("code-review")).toBeVisible()
     expect(screen.getByText("2 calls")).toBeVisible()
-    expect(screen.queryByText("Files changed")).not.toBeInTheDocument()
+    // Files published nothing: the section title still shows, empty.
+    expect(screen.getByText("Files changed")).toBeVisible()
+    // The row folds its detail: what ran and how it ended.
+    await user.click(screen.getByText("sleep 120"))
+    expect(screen.getByText("sleep 120 && exit 1")).toBeVisible()
+    expect(screen.getByText("exited with code 1")).toBeVisible()
     retractTranscriptInsights(1, "t")
   })
 })

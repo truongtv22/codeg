@@ -2288,6 +2288,7 @@
     },
     "activity": {
       "tabLabel": "활동",
+      "empty": "아직 없습니다",
       "live": {
         "title": "실행 중",
         "subagents": "{count}개 서브에이전트 실행 중",

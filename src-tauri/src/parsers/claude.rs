@@ -48,6 +48,12 @@ pub(crate) const BACKGROUND_TASK_MARKER: &str = "[[codeg-background-task]]";
 /// `settled` event, so the live-flipped card matches the cold-parse cap and an
 /// oversized report can't blow the event-stream size budget.
 pub(crate) const BACKGROUND_RESULT_MAX_CHARS: usize = 16_000;
+/// The result excerpt a settled background task's Activity row carries — the
+/// full result is the output file's job, the row needs the shape of the answer.
+pub(crate) const BACKGROUND_RESULT_DETAIL_MAX_CHARS: usize = 2_000;
+/// How much of a launch command the Activity row keeps (a runaway prompt
+/// should not bloat the detail panel).
+pub(crate) const BACKGROUND_COMMAND_MAX_CHARS: usize = 500;
 
 /// Latest `<task-notification>` observed for a background task id.
 struct BackgroundNotification {
@@ -59,6 +65,10 @@ struct BackgroundNotification {
     interim: bool,
     /// The notification's `<output-file>` when it carried one.
     output_file_path: Option<String>,
+    /// The `<tool-use-id>` of the launching tool call — the join key back to
+    /// the launch card (a background shell's only one; the Agent tool's also
+    /// has the ack map).
+    tool_use_id: Option<String>,
 }
 
 /// Skill invocations of one session, grouped by name in first-use order —
@@ -111,6 +121,53 @@ fn is_skill_tool_block(item: &serde_json::Value) -> bool {
         && item.get("name").and_then(|n| n.as_str()) == Some("Skill")
 }
 
+/// The skill name a rendered slash command (`/name args…`) invokes, without
+/// the leading slash. `None` when the display is not a slash command.
+fn slash_command_skill_name(display: &str) -> Option<String> {
+    let name = display.split_whitespace().next()?;
+    let name = name.strip_prefix('/')?;
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Whether a record is the expanded skill content the CLI writes right after
+/// a skill invocation — the confirmation a buffered `pending_skill` waits for.
+/// Built-in commands (`/model`, `/compact`) expand to nothing like this.
+fn record_is_skill_expansion(value: &serde_json::Value) -> bool {
+    const MARKER: &str = "Base directory for this skill:";
+    let Some(content) = value.get("message").and_then(|m| m.get("content")) else {
+        return false;
+    };
+    match content {
+        serde_json::Value::String(text) => text.contains(MARKER),
+        serde_json::Value::Array(items) => items.iter().any(|item| {
+            item.get("text")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t.contains(MARKER))
+        }),
+        _ => false,
+    }
+}
+
+/// The human-readable command a background launch ran, from the launching
+/// tool call's input JSON: a shell's command line, or the background agent's
+/// prompt. `None` when the input is not parseable JSON (older spellings).
+fn command_from_input_preview(
+    tool_name: &str,
+    input_json: &str,
+) -> Option<String> {
+    let input: serde_json::Value = serde_json::from_str(input_json).ok()?;
+    let command = if tool_name == "Bash" {
+        input.get("command").and_then(|v| v.as_str())
+    } else {
+        ["prompt", "task", "description"]
+            .iter()
+            .find_map(|key| input.get(key).and_then(|v| v.as_str()))
+    }?
+    .trim();
+    (!command.is_empty())
+        .then(|| truncate_str(command, BACKGROUND_COMMAND_MAX_CHARS).to_string())
+}
+
 /// Record one `<task-notification>` payload under its task id. The same id can
 /// notify more than once (a resumed sub-agent re-notifies), so the last wins.
 fn record_task_notification(
@@ -138,6 +195,9 @@ fn record_task_notification(
             }),
             interim: task_notification_is_interim(raw),
             output_file_path: capture_tag(task_notification_output_file_regex(), raw),
+            tool_use_id: capture_tag(task_notification_tool_use_id_regex(), raw)
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string()),
         },
     );
 }
@@ -1881,6 +1941,14 @@ pub(crate) struct ClaudeRecordAccumulator {
     /// Skill invocations seen so far, keyed by name, in first-use order (see
     /// [`SkillTally`]).
     skill_tally: SkillTally,
+    /// A slash command awaiting skill confirmation: the invocation's name and
+    /// timestamp. The record AFTER the command confirms it (the CLI writes the
+    /// expanded skill content right after) or not (a built-in like `/model`
+    /// expands to nothing). See `record_is_skill_expansion`.
+    pending_skill: Option<(String, Option<DateTime<Utc>>)>,
+    /// `Skill` tool_use ids already tallied — a resumed or re-serialized
+    /// record must not count its call twice.
+    skill_tool_ids: std::collections::HashSet<String>,
     /// task id → the `<summary>`-style name the LAUNCH record gives it (the
     /// async ack's `description`, a background shell's `description`). Joins
     /// with `background_notifications` in [`Self::session_activity`], which
@@ -1958,6 +2026,8 @@ impl ClaudeRecordAccumulator {
             background_acks: std::collections::HashMap::new(),
             background_notifications: std::collections::HashMap::new(),
             skill_tally: SkillTally::default(),
+            pending_skill: None,
+            skill_tool_ids: std::collections::HashSet::new(),
             background_task_names: std::collections::HashMap::new(),
             turn_starts: Vec::new(),
             usage_owner_by_message_id: std::collections::HashMap::new(),
@@ -2082,6 +2152,8 @@ impl ClaudeRecordAccumulator {
             background_acks,
             background_notifications,
             skill_tally,
+            pending_skill,
+            skill_tool_ids,
             background_task_names,
             turn_starts,
             usage_owner_by_message_id,
@@ -2135,6 +2207,17 @@ impl ClaudeRecordAccumulator {
             Some(PendingCommandVerdict::Wait) | None => {}
         }
 
+        // A buffered skill invocation is settled by this record: the CLI
+        // writes the expanded skill content right after the command (the
+        // marker lives there), so confirmation is one record away. Anything
+        // else drops it — a built-in command (`/model`, `/compact`) expands
+        // to no skill content.
+        if let Some((name, at)) = pending_skill.take() {
+            if record_is_skill_expansion(&value) {
+                skill_tally.record(Some(name), at);
+            }
+        }
+
         // Skip system meta messages and interrupt bookkeeping (see the
         // matching filter on the batch path).
         if is_meta_message(&value) || is_interrupt_marker(&value) {
@@ -2179,6 +2262,9 @@ impl ClaudeRecordAccumulator {
         if msg_type == "user" {
             if let Some((display, prompt_id)) = slash_command_value_display(&value) {
                 let timestamp = parse_timestamp(&value).unwrap_or_else(Utc::now);
+                // The command MIGHT be a skill invocation; the next record's
+                // expansion confirms or drops it (see `pending_skill`).
+                *pending_skill = slash_command_skill_name(&display).map(|name| (name, Some(timestamp)));
                 let uuid = value
                     .get("uuid")
                     .and_then(|u| u.as_str())
@@ -2473,10 +2559,19 @@ impl ClaudeRecordAccumulator {
                     if let Some(items) = content_value.as_array() {
                         for item in items {
                             if is_skill_tool_block(item) {
-                                let name = item
-                                    .get("input")
-                                    .and_then(skill_name_from_input);
-                                skill_tally.record(name, timestamp_utc);
+                                // Count each tool call once: a resumed session
+                                // re-serializes records it already fed.
+                                let tool_id = item
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if tool_id.is_empty() || skill_tool_ids.insert(tool_id.to_string())
+                                {
+                                    let name = item
+                                        .get("input")
+                                        .and_then(skill_name_from_input);
+                                    skill_tally.record(name, timestamp_utc);
+                                }
                             }
                         }
                     }
@@ -2965,6 +3060,16 @@ impl ClaudeRecordAccumulator {
     /// record's description as the row name when the notification carries no
     /// summary.
     pub(crate) fn session_activity(&self) -> SessionActivity {
+        // Agent-tool tasks join back to their launch through the async ack:
+        // `background_acks` holds tool_use_id → task id, so invert it. Shell
+        // tasks have no ack record; their notification names the launching
+        // tool call directly (`<tool-use-id>`), so that is the primary join
+        // and this map only fills the gap the notification left blank.
+        let mut launch_tool_by_task: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for (tool_use_id, task_id) in &self.background_acks {
+            launch_tool_by_task.entry(task_id.as_str()).or_insert(tool_use_id.as_str());
+        }
         SessionActivity {
             skills: self
                 .skill_tally
@@ -2987,25 +3092,57 @@ impl ClaudeRecordAccumulator {
                     )
                 })
                 .filter(|(_, notification)| !notification.interim)
-                .map(|(task_id, notification)| BackgroundTaskInfo {
-                    task_id: task_id.clone(),
-                    name: notification
-                        .summary
-                        .clone()
-                        .or_else(|| self.background_task_names.get(task_id).cloned())
-                        .unwrap_or_else(|| task_id.clone()),
-                    // Only tasks with a recorded async-launch ack are the
-                    // `Agent` tool's background form; a notification whose
-                    // launch never left a `toolUseResult` is a background
-                    // shell (the `Bash` tool's).
-                    task_type: if self.background_acks.values().any(|id| id == task_id) {
-                        "task".to_string()
-                    } else {
-                        "shell".to_string()
-                    },
-                    state: notification.status.clone(),
-                    last_tool_name: None,
-                    output_file_path: notification.output_file_path.clone(),
+                .map(|(task_id, notification)| {
+                    let launch_tool_use_id = notification
+                        .tool_use_id
+                        .as_deref()
+                        .or_else(|| launch_tool_by_task.get(task_id.as_str()).copied());
+                    let command = launch_tool_use_id
+                        .and_then(|tool_use_id| {
+                            self.messages.iter().find_map(|message| {
+                                message.content.iter().find_map(|block| {
+                                    match block {
+                                        ContentBlock::ToolUse {
+                                            tool_use_id: Some(id),
+                                            tool_name,
+                                            input_preview,
+                                            ..
+                                        } if id == tool_use_id => {
+                                            Some((tool_name.as_str(), input_preview))
+                                        }
+                                        _ => None,
+                                    }
+                                })
+                            })
+                        })
+                        .and_then(|(tool_name, input_preview)| {
+                            command_from_input_preview(tool_name, input_preview.as_deref()?)
+                        });
+                    BackgroundTaskInfo {
+                        task_id: task_id.clone(),
+                        name: notification
+                            .summary
+                            .clone()
+                            .or_else(|| self.background_task_names.get(task_id).cloned())
+                            .unwrap_or_else(|| task_id.clone()),
+                        // Only tasks with a recorded async-launch ack are the
+                        // `Agent` tool's background form; a notification whose
+                        // launch never left a `toolUseResult` is a background
+                        // shell (the `Bash` tool's).
+                        task_type: if self.background_acks.values().any(|id| id == task_id) {
+                            "task".to_string()
+                        } else {
+                            "shell".to_string()
+                        },
+                        state: notification.status.clone(),
+                        command,
+                        // The notification's result excerpt: what the task
+                        // produced, for the row's expandable detail.
+                        result_summary: notification.result.as_ref().map(|result| {
+                            truncate_str(result, BACKGROUND_RESULT_DETAIL_MAX_CHARS)
+                        }),
+                        output_file_path: notification.output_file_path.clone(),
+                    }
                 })
                 .collect(),
         }
@@ -9592,6 +9729,77 @@ mod tests {
         ];
         let detail = parse_lines("sess-interim-bgtask", &lines);
         assert!(detail.session_activity.is_none());
+    }
+
+    #[test]
+    fn slash_command_skills_tally_when_the_expansion_confirms() {
+        // `/code-review` invoked as a slash command: the invocation record
+        // buffers the name, the NEXT record carries the skill expansion and
+        // settles it. A built-in command (`/model`) expands to nothing, so it
+        // never counts — and a buffered name dropped by an unrelated record
+        // stays dropped.
+        let lines = vec![
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:00.000Z","uuid":"u1","cwd":"/Users/test/proj","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#.to_string(),
+            // The slash invocation itself.
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:05.000Z","uuid":"u2","message":{"role":"user","content":"<command-name>/code-review</command-name><command-message>review</command-message><command-args></command-args>"}}"#.to_string(),
+            // The expansion record that confirms it.
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:06.000Z","uuid":"u3","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /Users/test/.claude/skills/code-review\nReview the latest changes."}]}}"#.to_string(),
+            // A built-in with no expansion — must not count.
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:10.000Z","uuid":"u4","message":{"role":"user","content":"<command-name>/model</command-name><command-message>opus</command-message><command-args></command-args>"}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:11.000Z","uuid":"u5","message":{"role":"user","content":[{"type":"text","text":"Set model to opus"}]}}"#.to_string(),
+            // The same skill again: counts merge.
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:20.000Z","uuid":"u6","message":{"role":"user","content":"<command-name>/code-review</command-name><command-message>review</command-message><command-args></command-args>"}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:21.000Z","uuid":"u7","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /Users/test/.claude/skills/code-review\nReview again."}]}}"#.to_string(),
+        ];
+        let detail = parse_lines("sess-slash-skills", &lines);
+        let activity = detail.session_activity.expect("activity present");
+        let skills: Vec<(String, u32)> = activity
+            .skills
+            .iter()
+            .map(|s| (s.name.clone(), s.call_count))
+            .collect();
+        assert_eq!(skills, vec![("code-review".into(), 2)]);
+        // The use time is the slash invocation's own (the expansion record
+        // merely confirms it).
+        assert_eq!(
+            activity.skills[0].last_used_at.map(|t| t.to_rfc3339()),
+            Some("2026-09-05T03:40:20+00:00".to_string())
+        );
+    }
+
+    #[test]
+    fn settled_background_tasks_carry_the_command_and_result() {
+        // The launching tool call's input gives the command (a shell's command
+        // line, a background agent's description), the notification's result
+        // the outcome summary.
+        let lines = vec![
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:00.000Z","uuid":"u1","cwd":"/Users/test/proj","message":{"role":"user","content":[{"type":"text","text":"go"}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:05.000Z","uuid":"a1","message":{"id":"msg_01","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"sleep 120 && exit 1","run_in_background":true}}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:06.000Z","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"shell id bg-9"}]}}"#.to_string(),
+            r#"{"type":"assistant","timestamp":"2026-09-05T03:40:07.000Z","uuid":"a2","message":{"id":"msg_02","role":"assistant","model":"claude-opus-5","content":[{"type":"tool_use","id":"t2","name":"Agent","input":{"subagent_type":"Explore","description":"scan the parsers"}}]}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:40:08.000Z","uuid":"u3","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","content":"ack"}]},"toolUseResult":{"status":"async_launched","agentId":"agent-1","description":"scan the parsers"}}"#.to_string(),
+            r#"{"type":"attachment","timestamp":"2026-09-05T03:41:30.000Z","uuid":"u4","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"<task-notification><task-id>bg-9</task-id><tool-use-id>t1</tool-use-id><status>failed</status><summary>sleep exploded</summary><output-file>/tmp/bg-9.out</output-file></task-notification>"}}"#.to_string(),
+            r#"{"type":"user","timestamp":"2026-09-05T03:42:00.000Z","uuid":"u5","message":{"role":"user","content":"<task-notification><task-id>agent-1</task-id><status>completed</status><summary>scan the parsers</summary><result>found 3 mismatches</result></task-notification>"}}"#.to_string(),
+        ];
+        let detail = parse_lines("sess-bgtask-detail", &lines);
+        let activity = detail.session_activity.expect("activity present");
+        let by_id: std::collections::HashMap<&str, &BackgroundTaskInfo> = activity
+            .background_tasks
+            .iter()
+            .map(|t| (t.task_id.as_str(), t))
+            .collect();
+        let shell = by_id.get("bg-9").unwrap();
+        // The shell joins through the notification's own <tool-use-id>.
+        assert_eq!(shell.command.as_deref(), Some("sleep 120 && exit 1"));
+        assert_eq!(shell.result_summary, None, "no <result> in the payload");
+        // The agent joins through the ack map (its notification carries no
+        // <tool-use-id> in this fixture).
+        let agent = by_id.get("agent-1").unwrap();
+        assert_eq!(agent.command.as_deref(), Some("scan the parsers"));
+        assert_eq!(
+            agent.result_summary.as_deref(),
+            Some("found 3 mismatches")
+        );
     }
 }
 
