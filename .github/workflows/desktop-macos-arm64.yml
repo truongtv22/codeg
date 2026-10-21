@@ -36,7 +36,10 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # macos-latest is a moving label; during GitHub's arm64 capacity crunch the
+    # dispatch sat un-acquired until it failed. Pin macos-15 (an arm64 image)
+    # for a shorter, stabler queue; macos-14 is the fallback if 15 crowds out.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
