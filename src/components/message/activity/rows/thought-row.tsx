@@ -57,7 +57,7 @@ export const ThoughtRow = memo(function ThoughtRow({
       onExpandedChange={setOpen}
       title={step.title ?? undefined}
       detail={() => (
-        <div className="max-w-[65ch] text-sm leading-relaxed text-muted-foreground [&_p]:my-1.5">
+        <div className="text-sm leading-relaxed text-muted-foreground [&_p]:my-1.5">
           <ReasoningMarkdown isStreaming={step.streaming}>
             {body}
           </ReasoningMarkdown>
