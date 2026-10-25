@@ -1676,6 +1676,7 @@ fn report_canceled(message: &str) -> DelegationTaskReport {
         blocked_on: None,
         assistant_id: None,
         assistant_name: None,
+        progress: None,
     }
 }
 
@@ -1693,6 +1694,7 @@ fn report_failed(error_code: &str, message: &str) -> DelegationTaskReport {
         blocked_on: None,
         assistant_id: None,
         assistant_name: None,
+        progress: None,
     }
 }
 
@@ -1711,6 +1713,7 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         blocked_on: None,
         assistant_id: None,
         assistant_name: None,
+        progress: None,
     }
 }
 

@@ -768,6 +768,7 @@ fn push_goal_marker(messages: &mut Vec<UnifiedMessage>, goal: &PendingGoal) -> O
                 is_error: false,
                 agent_stats: None,
                 images: Vec::new(),
+                exit_code: None,
             },
         ],
         timestamp: goal.timestamp,
@@ -1180,6 +1181,7 @@ fn compaction_blocks(value: &serde_json::Value, tool_use_id: String) -> Vec<Cont
             is_error: false,
             agent_stats: None,
             images: Vec::new(),
+            exit_code: None,
         },
     ]
 }
@@ -2939,6 +2941,7 @@ impl ClaudeRecordAccumulator {
                         is_error,
                         agent_stats: None,
                         images: Vec::new(),
+                        exit_code: None,
                     });
                 } else {
                     let timestamp = parse_timestamp(&value).unwrap_or_else(Utc::now);
@@ -2951,6 +2954,7 @@ impl ClaudeRecordAccumulator {
                             is_error,
                             agent_stats: None,
                             images: Vec::new(),
+                            exit_code: None,
                         }],
                         timestamp,
                         usage: None,
@@ -3338,6 +3342,7 @@ fn user_content_blocks(content: &serde_json::Value) -> Vec<ContentBlock> {
                         is_error,
                         agent_stats: None,
                         images,
+                        exit_code: None,
                     });
                 }
                 _ => {}

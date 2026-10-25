@@ -16,9 +16,8 @@ import { useSessionViewerHost } from "@/components/message/session-viewer-host-c
 /**
  * A settled sub-agent, as the transcript's delegation cards render it: who
  * ran it with its status badge, its task below, and — once it has a
- * conversation — the eye that opens it (the whole card does). Shared by the
- * transcript's message navigation and the Activity tab, so the two never
- * disagree.
+ * conversation — the eye that opens it (the whole card does). Used by the
+ * Activity tab; the message navigation draws its own line instead.
  */
 export function NavSubAgentCard({ source }: { source: DelegationCardSource }) {
   const t = useTranslations("Folder.chat.delegation")
@@ -30,9 +29,11 @@ export function NavSubAgentCard({ source }: { source: DelegationCardSource }) {
 
   const body = (
     <span className="flex min-w-0 flex-1 items-center gap-2.5 py-2 ps-2.5 pe-2">
+      {/* ponytail: `header` is the 28px size; upstream dropped `compact`,
+          which this card used. Same diameter, square-ish corners. */}
       <DelegationIdentityAvatar
         identity={identity}
-        size="compact"
+        size="header"
         badge={
           resumed ? (
             <span
@@ -50,7 +51,7 @@ export function NavSubAgentCard({ source }: { source: DelegationCardSource }) {
             identity={identity}
             className="min-w-0 truncate text-xs font-semibold text-foreground"
           />
-          <StatusBadge status={status} errorCode={errorCode} size="sm" />
+          <StatusBadge status={status} errorCode={errorCode} />
         </span>
         {task && (
           <span

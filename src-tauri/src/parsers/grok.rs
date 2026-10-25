@@ -857,6 +857,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     is_error: false,
                     agent_stats: None,
                     images: Vec::new(),
+                    exit_code: None,
                 });
                 if !id.is_empty() {
                     tool_result_idx.insert(id, turn.blocks.len() - 1);
@@ -927,6 +928,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     is_error: false,
                     agent_stats: None,
                     images: Vec::new(),
+                    exit_code: None,
                 });
             }
             // A failed auto-compaction: the same card in its failed state, as the
@@ -954,6 +956,7 @@ fn parse_updates(path: &Path) -> ParsedUpdates {
                     is_error: true,
                     agent_stats: None,
                     images: Vec::new(),
+                    exit_code: None,
                 });
             }
             // Sub-agent lifecycle (namespaced `_x.ai/session/update` method).
