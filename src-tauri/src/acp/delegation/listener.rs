@@ -33,9 +33,10 @@ use crate::acp::delegation::transport::{
     BrokerComputerAppsRequest, BrokerComputerCaptureRequest, BrokerComputerLaunchRequest,
     BrokerComputerSnapshotRequest,
     BrokerComputerVerifyRequest, BrokerComputerWindowsRequest, BrokerCommitFeedbackRequest,
-    BrokerFeedbackRequest, BrokerListAssistantsRequest, BrokerMessage, BrokerRequest,
-    BrokerCanvasReadRequest, BrokerCreateAutomationRequest, BrokerCreateWorkTaskRequest,
-    BrokerListAutomationsRequest, BrokerListWorkTasksRequest, BrokerResponse,
+    BrokerContinueTaskRequest, BrokerFeedbackRequest, BrokerListAssistantsRequest, BrokerMessage,
+    BrokerRequest, BrokerCanvasReadRequest, BrokerCreateAutomationRequest,
+    BrokerCreateWorkTaskRequest, BrokerListAutomationsRequest, BrokerListWorkTasksRequest,
+    BrokerResponse,
     BrokerResultSchemaRequest, BrokerResumeTaskRequest, BrokerSessionRequest,
     BrokerStatusRequest, BrokerSubmitResultRequest, BrokerTaskCompleteRequest,
     BrokerTaskProgressRequest,
@@ -459,6 +460,7 @@ impl DelegationListener {
                 outcome: self.process_list_assistants(req).await,
             },
             BrokerMessage::Call(req) => report_response(self.process(req).await)?,
+            BrokerMessage::ContinueTask(req) => report_response(self.process_continue_task(req).await)?,
             BrokerMessage::Status(req) => {
                 // A status long-poll — especially `wait_ms = 0` (block until
                 // terminal) — can park for the whole lifetime of the child.
@@ -857,6 +859,29 @@ impl DelegationListener {
                 parent_conversation_id,
                 task_id: req.task_id,
                 reason: req.reason,
+                external_handle: req.external_handle,
+            })
+            .await
+    }
+
+    async fn process_continue_task(&self, req: BrokerContinueTaskRequest) -> DelegationTaskReport {
+        let Some(entry) = self.tokens.lookup(&req.token).await else {
+            return unknown_report(&req.task_id);
+        };
+        let Some(parent_conversation_id) = self
+            .parent_lookup
+            .current_conversation_id(&entry.parent_connection_id)
+            .await
+        else {
+            return cancel("parent has no active conversation");
+        };
+        self.broker
+            .continue_delegation(crate::acp::delegation::types::ContinueDelegationRequest {
+                parent_connection_id: entry.parent_connection_id,
+                parent_conversation_id,
+                parent_tool_use_id: String::new(),
+                task_id: req.task_id,
+                task: req.task,
                 external_handle: req.external_handle,
             })
             .await
@@ -1677,7 +1702,9 @@ fn report_canceled(message: &str) -> DelegationTaskReport {
         assistant_id: None,
         assistant_name: None,
         progress: None,
-    }
+
+        source_task_id: None,
+        successor_task_id: None,    }
 }
 
 /// A `Failed` report carrying a wire-stable `error_code` for a bad argument.
@@ -1695,7 +1722,9 @@ fn report_failed(error_code: &str, message: &str) -> DelegationTaskReport {
         assistant_id: None,
         assistant_name: None,
         progress: None,
-    }
+
+        source_task_id: None,
+        successor_task_id: None,    }
 }
 
 /// An `Unknown` report — used when a status/cancel request fails the token
@@ -1714,7 +1743,9 @@ fn unknown_report(task_id: &str) -> DelegationTaskReport {
         assistant_id: None,
         assistant_name: None,
         progress: None,
-    }
+
+        source_task_id: None,
+        successor_task_id: None,    }
 }
 
 fn cancel(message: &str) -> DelegationTaskReport {
