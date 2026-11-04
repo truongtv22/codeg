@@ -30,21 +30,20 @@ export function NavSubAgentCard({ source }: { source: DelegationCardSource }) {
   const body = (
     <span className="flex min-w-0 flex-1 items-center gap-2.5 py-2 ps-2.5 pe-2">
       {/* ponytail: `header` is the 28px size; upstream dropped `compact`,
-          which this card used. Same diameter, square-ish corners. */}
-      <DelegationIdentityAvatar
-        identity={identity}
-        size="header"
-        badge={
-          resumed ? (
-            <span
-              className="inline-flex size-3.5 items-center justify-center rounded-full border border-border bg-background"
-              title={t("resumed")}
-            >
-              <RotateCcw className="size-2 text-muted-foreground" />
-            </span>
-          ) : undefined
-        }
-      />
+          which this card used. Same diameter, square-ish corners. Upstream
+          also dropped the avatar's `badge` slot, so the resumed mark is a
+          sibling here. */}
+      <span className="relative inline-flex shrink-0">
+        <DelegationIdentityAvatar identity={identity} size="header" />
+        {resumed ? (
+          <span
+            className="absolute -bottom-0.5 -right-0.5 inline-flex size-3.5 items-center justify-center rounded-full border border-border bg-background"
+            title={t("resumed")}
+          >
+            <RotateCcw className="size-2 text-muted-foreground" />
+          </span>
+        ) : null}
+      </span>
       <span className="min-w-0 flex-1 space-y-0.5">
         <span className="flex min-w-0 items-center gap-1.5">
           <DelegationIdentityName
