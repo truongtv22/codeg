@@ -22,12 +22,6 @@ on:
         description: "Release tag (default: v<version> from tauri.conf.json)"
         type: string
         required: false
-  # One-shot so the 0.45.0 Apple Silicon release build starts without an
-  # Actions dispatch token. The following commit removes this trigger.
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/desktop-macos-arm64.yml
 
 env:
   RUST_BACKTRACE: short
