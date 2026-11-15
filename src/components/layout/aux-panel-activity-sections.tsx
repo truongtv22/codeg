@@ -2,7 +2,14 @@
 
 import { useState } from "react"
 import { useTranslations } from "next-intl"
-import { Bot, ChevronRight, Loader2, TerminalIcon } from "lucide-react"
+import {
+  Activity,
+  Bot,
+  ChevronRight,
+  Loader2,
+  Sparkles,
+  TerminalIcon,
+} from "lucide-react"
 
 import { InsightsSection } from "./session-details-insights"
 import { useSessionDetailsSectionOpen } from "@/lib/session-details-prefs"
@@ -72,6 +79,7 @@ export function ActivityLiveSection({
   const total = runningSubagents + liveBackgroundTasks.length
   return (
     <InsightsSection
+      icon={<Activity />}
       title={t("live.title")}
       summary={total}
       open={open}
@@ -138,6 +146,7 @@ export function ActivityBackgroundSection({
   const backgroundTasks = activity?.backgroundTasks ?? []
   return (
     <InsightsSection
+      icon={<TerminalIcon />}
       title={t("background.title")}
       summary={backgroundTasks.length}
       open={open}
@@ -253,6 +262,7 @@ export function ActivitySkillsSection({
   const skills = activity?.skills ?? []
   return (
     <InsightsSection
+      icon={<Sparkles />}
       title={t("skills.title")}
       summary={skills.length}
       open={open}

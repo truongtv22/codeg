@@ -300,6 +300,11 @@ function joinRoundSubAgents(
   ]
 }
 
+function sentAtOf(timestamp: string | undefined): number | null {
+  const ms = timestamp ? Date.parse(timestamp) : NaN
+  return Number.isFinite(ms) ? ms : null
+}
+
 /**
  * One navigator entry per user message: every message of the conversation
  * when `earlierTurns` is given, otherwise the loaded ones, numbered on from
@@ -380,6 +385,7 @@ export function buildMessageNavEntries({
             turnIndex,
             turnId,
             ordinal,
+            sentAt: sentAtOf(turns[roundStart].timestamp),
             label: changes.label,
             additions: changes.additions,
             deletions: changes.deletions,

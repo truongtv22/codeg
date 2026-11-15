@@ -135,6 +135,7 @@ describe("ActivityTab", () => {
         earlier: null,
         revealingTurnId: null,
         currentTurnId: null,
+        running: null,
       },
       plan: { entries: [], streaming: false },
       activity: {
@@ -164,6 +165,7 @@ describe("ActivityTab", () => {
         earlier: null,
         revealingTurnId: null,
         currentTurnId: null,
+        running: null,
       },
       plan: { entries: [], streaming: false },
       activity: {

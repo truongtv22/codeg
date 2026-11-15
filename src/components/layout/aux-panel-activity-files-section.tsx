@@ -2,7 +2,7 @@
 
 import { useState } from "react"
 import { useTranslations } from "next-intl"
-import { ChevronDown, ChevronRight } from "lucide-react"
+import { Bot, ChevronDown, ChevronRight, FileDiff } from "lucide-react"
 
 import { CompactDiff } from "@/components/diff/compact-diff"
 import { ViewModeToggle } from "@/components/diff/unified-diff-preview"
@@ -43,6 +43,7 @@ export function ActivitySubagentsSection({
   const [open, setOpen] = useSessionDetailsSectionOpen("subagents")
   return (
     <InsightsSection
+      icon={<Bot />}
       title={t("subagents.title")}
       summary={rows.length}
       open={open}
@@ -126,6 +127,7 @@ export function ActivityFilesSection({
   const [expandedId, setExpandedId] = useState<string | null>(null)
   return (
     <InsightsSection
+      icon={<FileDiff />}
       title={t("files.title")}
       summary={files.length}
       open={open}
