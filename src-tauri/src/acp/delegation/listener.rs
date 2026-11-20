@@ -2478,6 +2478,7 @@ mod tests {
             .register(
                 "tok".into(),
                 TokenEntry {
+                    agent_hosts_tools: false,
                     parent_connection_id: "parent-conn".into(),
                     working_dir: PathBuf::from("/tmp"),
                 },
