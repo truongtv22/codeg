@@ -155,6 +155,7 @@ mod tests {
                         value: (*v).to_string(),
                         name: (*v).to_string(),
                         description: None,
+                        reasoning_efforts: None,
                     })
                     .collect(),
                 groups: Vec::new(),
@@ -203,6 +204,7 @@ mod tests {
                 value: "grouped-1".into(),
                 name: "Grouped 1".into(),
                 description: None,
+                reasoning_efforts: None,
             }],
         });
         let choices = extract_choices(&[option]);

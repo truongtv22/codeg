@@ -622,7 +622,7 @@ mod tests {
             Some(AcpEvent::BackgroundActivity { outstanding: 1, .. })
         ));
         let parser = AntigravityParser {
-            base_dir: configured.clone(),
+            base_dirs: vec![configured.clone()],
             fallback: Some(default),
         };
         assert!(parser.get_conversation("session").is_ok());
