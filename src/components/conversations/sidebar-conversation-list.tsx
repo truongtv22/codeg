@@ -16,7 +16,12 @@ import { useTranslations } from "next-intl"
 import { toast } from "sonner"
 import { Virtualizer, type VirtualizerHandle } from "virtua"
 import {
+  Activity,
   Bot,
+  Calendar1,
+  CalendarDays,
+  CalendarMinus,
+  CalendarRange,
   Check,
   ChevronDown,
   ChevronRight,
@@ -28,6 +33,7 @@ import {
   FolderOpen,
   FolderOpenDot,
   FolderRoot,
+  History,
   Layers,
   LayersPlus,
   Link2,
@@ -42,6 +48,7 @@ import {
   Tag,
   Tags,
   XCircle,
+  type LucideIcon,
 } from "lucide-react"
 import { useActiveFolder } from "@/contexts/active-folder-context"
 import { useAppWorkspaceStore } from "@/stores/app-workspace-store"
@@ -80,10 +87,13 @@ import {
   loadFolderGroupExpanded,
   saveFolderGroupExpanded,
   loadRecentFilter,
+  loadRecentGroupingMode,
   loadSectionCollapsed,
   saveRecentFilter,
+  saveRecentGroupingMode,
   saveSectionCollapsed,
   type SidebarRecentFilter,
+  type SidebarRecentGroupingMode,
   loadConversationExpanded,
   saveConversationExpanded,
   DEFAULT_SECTION_ORDER,
@@ -126,6 +136,7 @@ import {
   folderHeaderFlatIndices,
   groupByFolderWithReuse,
   headerIndexForFolder,
+  localDayStart,
   mergeChildrenById,
   nextHeaderAfter,
   pointerYToTargetIndex,
@@ -138,6 +149,7 @@ import {
   worktreeChildrenByParent,
   worktreeHeaderAlias,
   type DragSlot,
+  type RecentTimeGroupId,
   type SidebarEntry,
   type SidebarLayout,
   type SidebarRow,
@@ -196,6 +208,20 @@ import { toErrorMessage } from "@/lib/app-error"
 // paint) but a no-op-safe passive effect during the static-export prerender.
 const useIsomorphicLayoutEffect =
   typeof window !== "undefined" ? useLayoutEffect : useEffect
+
+// Leading glyph of each Recent time-group heading — the same slot the
+// "show more" footer puts its chevron in. Running sessions get a live pulse;
+// the date groups stay in one calendar family that widens with the span (a
+// single day → the day before → a range → a month grid), and "older" falls
+// back to history rather than Archive, which would read as archived.
+const RECENT_TIME_GROUP_ICONS: Record<RecentTimeGroupId, LucideIcon> = {
+  priorities: Activity,
+  today: Calendar1,
+  yesterday: CalendarMinus,
+  previous7Days: CalendarRange,
+  previous30Days: CalendarDays,
+  older: History,
+}
 
 // Shared empty merge map used when "Show worktrees" is on: worktree children
 // then keep their own conversation bucket / count / theme instead of being
@@ -1113,6 +1139,17 @@ export function SidebarConversationList({
     saveRecentFilter(next)
     setRecentFilter(next)
   }, [])
+  // Time groups or one flat list for the Recent section. Persisted and
+  // hydrated after mount, like the filter above.
+  const [recentGroupingMode, setRecentGroupingMode] =
+    useState<SidebarRecentGroupingMode>("time")
+  const changeRecentGroupingMode = useCallback(
+    (next: SidebarRecentGroupingMode) => {
+      saveRecentGroupingMode(next)
+      setRecentGroupingMode(next)
+    },
+    []
+  )
   // How many Recent rows are currently revealed. Session-only (not persisted):
   // "show me more of this list right now" is a reading gesture, not a setting —
   // and a fresh sidebar should open short again.
@@ -1253,6 +1290,7 @@ export function SidebarConversationList({
     setFolderGroupExpanded(loadFolderGroupExpanded())
     setSectionCollapsed(loadSectionCollapsed())
     setRecentFilter(loadRecentFilter())
+    setRecentGroupingMode(loadRecentGroupingMode())
     setConversationExpanded(new Set(loadConversationExpanded()))
   }, [])
 
@@ -1409,6 +1447,20 @@ export function SidebarConversationList({
     const interval = setInterval(relativeClock.tick, 60_000)
     return () => clearInterval(interval)
   }, [relativeClock])
+
+  // The local day Recent's time groups are measured from. Held as the day's
+  // start so the minute check below only re-renders when the date actually
+  // changes — past midnight "Today" has to become "Yesterday" even when no
+  // conversation changed to rebuild the rows. A same-day check is a no-op
+  // state write, so no render.
+  const [recentDayStart, setRecentDayStart] = useState(localDayStart)
+  useEffect(() => {
+    const interval = setInterval(
+      () => setRecentDayStart(localDayStart()),
+      60_000
+    )
+    return () => clearInterval(interval)
+  }, [])
 
   // The tag filter narrows what every section DRAWS — pinned, folders, chats
   // and recent all bucket from this. It never touches the per-folder counts
@@ -1670,6 +1722,8 @@ export function SidebarConversationList({
         layout,
         groupExpanded: folderGroupExpanded,
         hideEmptyFolders: tagFilterActive,
+        recentGroupingMode,
+        currentTime: recentDayStart,
       }),
     [
       pinned,
@@ -1685,6 +1739,8 @@ export function SidebarConversationList({
       recentExpanded,
       showRecent,
       recentLimit,
+      recentGroupingMode,
+      recentDayStart,
       sectionOrder,
       conversationExpanded,
       childrenByParent,
@@ -3059,6 +3115,12 @@ export function SidebarConversationList({
           onRecentFilterChange={
             row.section === "recent" ? changeRecentFilter : undefined
           }
+          recentGroupingMode={
+            row.section === "recent" ? recentGroupingMode : undefined
+          }
+          onRecentGroupingModeChange={
+            row.section === "recent" ? changeRecentGroupingMode : undefined
+          }
           // Every section header carries a top gap: it separates "Folders" from
           // the "Pinned" section above it, and — now that a fixed New chat /
           // Search region sits above the scrolled list — gives the first section
@@ -3196,6 +3258,64 @@ export function SidebarConversationList({
                 : recentFilter === "cli"
                   ? t("noRecentCli")
                   : t("noRecent")}
+        </div>
+      )
+    }
+    if (row.kind === "recent-time-group") {
+      const timeGroupLabels: Record<RecentTimeGroupId, string> = {
+        priorities: t("timeGroupPriorities"),
+        today: t("timeGroupToday"),
+        yesterday: t("timeGroupYesterday"),
+        previous7Days: t("timeGroupPrevious7Days"),
+        previous30Days: t("timeGroupPrevious30Days"),
+        older: t("timeGroupOlder"),
+      }
+      const label = timeGroupLabels[row.groupId]
+      const tooltip =
+        row.groupId === "priorities"
+          ? t("timeGroupPrioritiesTooltip")
+          : undefined
+      const GroupIcon = RECENT_TIME_GROUP_ICONS[row.groupId]
+      // A heading, not a control — but it copies the "show more" footer's
+      // geometry so the section reads as one column: the glyph sits on the
+      // rail axis where a card's agent icon does (0.75rem glyph in a 0.875rem
+      // box, centred on the var), the label starts at the card's title inset
+      // (`axis + 0.875rem`), same row height, size and colour. No hover:
+      // nothing here is clickable. Every heading but the first gets a top gap
+      // to set its group off from the previous group's rows; the first sits
+      // right under the section header and stays tight to it. Padding, not
+      // margin: the virtualizer measures the row box, and a child's margin
+      // would collapse out of it.
+      return (
+        <div
+          data-recent-time-group={row.groupId}
+          className={cn(!row.first && "pt-[0.75rem]")}
+          title={tooltip}
+        >
+          {/* 2rem slot holding a 1.9375rem content box, exactly like the
+              footer's wrapper + button, so icon and label share its centre. */}
+          <div className="h-[2rem]">
+            <div
+              className="relative flex h-[1.9375rem] items-center pr-[0.25rem] text-[0.75rem] text-muted-foreground/80 select-none"
+              style={{
+                paddingLeft: "calc(var(--conv-rail-axis, 0.875rem) + 0.875rem)",
+              }}
+            >
+              <span
+                aria-hidden
+                className="pointer-events-none absolute top-1/2 flex items-center justify-center"
+                style={{
+                  left: "var(--conv-rail-axis, 0.875rem)",
+                  width: "0.875rem",
+                  height: "0.875rem",
+                  transform: "translate(-50%, -50%)",
+                }}
+              >
+                <GroupIcon className="h-[0.75rem] w-[0.75rem]" />
+              </span>
+              <span className="truncate">{label}</span>
+            </div>
+          </div>
         </div>
       )
     }
@@ -3352,6 +3472,7 @@ export function SidebarConversationList({
     if (row.kind === "folders-empty") return "folders-empty"
     if (row.kind === "recent-empty") return "recent-empty"
     if (row.kind === "recent-more") return "recent-more"
+    if (row.kind === "recent-time-group") return `recent-group-${row.groupId}`
     const prefix = row.recent ? "recent-" : ""
     if (row.kind === "subsession-loading") {
       return `${prefix}subloading-${row.parentId}`

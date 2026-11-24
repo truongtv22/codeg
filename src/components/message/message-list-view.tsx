@@ -172,6 +172,8 @@ interface MessageListViewProps {
   availableCommands: readonly AvailableCommandInfo[] | null | undefined
   connStatus?: ConnectionStatus | null
   isActive?: boolean
+  /** Whether the mounted transcript is shown, including unfocused tiles. */
+  isVisible?: boolean
   sendSignal?: number
   detailLoading?: boolean
   detailError?: string | null
@@ -1599,6 +1601,7 @@ export function MessageListView({
   availableCommands,
   connStatus,
   isActive = true,
+  isVisible = true,
   sendSignal = 0,
   detailLoading = false,
   detailError = null,
@@ -2361,6 +2364,7 @@ export function MessageListView({
         asyncTasks: liveRuns?.asyncTasks ?? EMPTY_ASYNC_TASKS,
         foregroundAgents,
         backgroundTasks,
+        nativeShellTasks: agentType === "antigravity",
         findLaunchCard: (toolCallId) => {
           if (!cardThread) return null
           for (let i = cardThread.length - 1; i >= 0; i -= 1) {
@@ -2376,6 +2380,7 @@ export function MessageListView({
         delegationBindings,
       }),
     [
+      agentType,
       liveRuns?.asyncTasks,
       liveRuns?.delegatedChildren,
       foregroundAgents,
@@ -2581,6 +2586,7 @@ export function MessageListView({
         )}
         <SelectionActionBubble
           containerRef={selectionBoxRef}
+          isVisible={isVisible}
           onQuote={onQuoteSelection}
           onAsk={onAskSelection}
           onSaveAsNote={onSaveNoteSelection}
