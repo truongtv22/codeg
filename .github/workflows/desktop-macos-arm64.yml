@@ -36,10 +36,12 @@ concurrency:
 
 jobs:
   build:
-    # macos-latest is a moving label; during GitHub's arm64 capacity crunch the
-    # dispatch sat un-acquired until it failed. Pin macos-15 (an arm64 image)
-    # for a shorter, stabler queue; macos-14 is the fallback if 15 crowds out.
-    runs-on: macos-15
+    # macos-15 (Apple Silicon) is not being acquired: GitHub cancels the
+    # queued job after about 15 minutes with "not acquired by Runner of type
+    # hosted". macos-14 is retired. macos-15-intel is a separate x86_64 pool.
+    # The bundle target stays aarch64-apple-darwin; prepare-sidecars follows
+    # TAURI_ENV_TARGET_TRIPLE, which `tauri build --target` sets.
+    runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
 
@@ -57,15 +59,15 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
-      # Native build: the runner host triple IS aarch64-apple-darwin, so the
-      # host-fallback sidecar staging in beforeBuildCommand is correct here.
+      # Cross-compile: the host is x86_64, the bundle is aarch64. Do not reuse
+      # a cache saved by an arm64 runner.
       # cache-on-failure: a daily-driver workflow re-runs after flaky failures
       # and should not pay the cold build twice.
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
-          shared-key: desktop-darwin
+          shared-key: desktop-darwin-intel-host
           cache-on-failure: true
 
       - name: Setup pnpm
@@ -83,6 +85,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build desktop bundle
+        env:
+          # prepare-sidecars reads this before the host triple, so the Intel
+          # runner stages aarch64 sidecars for the arm64 bundle.
+          TAURI_TARGET_TRIPLE: aarch64-apple-darwin
         run: >
           pnpm tauri build --target aarch64-apple-darwin
           --config '{"bundle":{"createUpdaterArtifacts":false}}'
@@ -92,7 +98,10 @@ jobs:
         run: |
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
           DMG="src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/codeg_${VERSION}_aarch64.dmg"
+          BIN="src-tauri/target/aarch64-apple-darwin/release/codeg"
           [ -s "$DMG" ] || { echo "FATAL: $DMG not found"; ls src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/; exit 1; }
+          file "$BIN"
+          file "$BIN" | grep -q arm64 || { echo "FATAL: $BIN is not arm64"; exit 1; }
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
           ls -la "$DMG"
 

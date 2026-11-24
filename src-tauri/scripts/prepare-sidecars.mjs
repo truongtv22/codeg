@@ -4,7 +4,9 @@
 //
 // What it does:
 //   1. Resolves the target triple — `--target <triple>` arg, or
-//      `TAURI_TARGET_TRIPLE` env, or the host's `rustc -vV` host triple.
+//      `TAURI_TARGET_TRIPLE`, or `TAURI_ENV_TARGET_TRIPLE` (set by
+//      `tauri build --target` for beforeBuildCommand), or the host's
+//      `rustc -vV` host triple.
 //   2. Runs `cargo build --release --no-default-features`, with the feature
 //      each binary target requires, for each sidecar bin (`codeg-mcp`,
 //      `codeg-computer-helper`, `codeg-cli`) for that triple from
@@ -170,7 +172,10 @@ function main() {
 
   const { target: cliTarget } = parseArgs(process.argv.slice(2))
   const target =
-    cliTarget || process.env.TAURI_TARGET_TRIPLE || resolveHostTriple()
+    cliTarget ||
+    process.env.TAURI_TARGET_TRIPLE ||
+    process.env.TAURI_ENV_TARGET_TRIPLE ||
+    resolveHostTriple()
   const isWindows = target.includes("windows")
   const ext = isWindows ? ".exe" : ""
 

@@ -33,6 +33,14 @@ function prepare({
   shared = false,
   target = "x86_64-unknown-linux-gnu",
   metadata = "valid",
+  cliTarget = true,
+  env = {},
+}: {
+  shared?: boolean
+  target?: string
+  metadata?: string
+  cliTarget?: boolean
+  env?: Record<string, string>
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "codeg-sidecar-output-"))
   roots.push(root)
@@ -77,7 +85,12 @@ syncBuiltinESMExports()
   )
   const result = spawnSync(
     process.execPath,
-    ["--import", pathToFileURL(preload).href, entry, "--target", target],
+    [
+      "--import",
+      pathToFileURL(preload).href,
+      entry,
+      ...(cliTarget ? ["--target", target] : []),
+    ],
     {
       cwd: root,
       env: {
@@ -86,6 +99,7 @@ syncBuiltinESMExports()
         CODEG_SIDECAR_TEST_COMMANDS: commands,
         CODEG_SIDECAR_TEST_OUTPUT: output,
         CODEG_SIDECAR_TEST_METADATA: metadata,
+        ...env,
       },
       encoding: "utf8",
     }
@@ -118,6 +132,20 @@ describe("sidecar Cargo output staging", () => {
         readFileSync(join(crate, "binaries", `${bin}-${target}.exe`), "utf8")
       ).toBe(`built:${bin}`)
     }
+  })
+
+  it("follows TAURI_ENV_TARGET_TRIPLE from tauri build --target", () => {
+    const target = "aarch64-unknown-linux-gnu"
+    const { result, crate, commands } = prepare({
+      target,
+      cliTarget: false,
+      env: { TAURI_ENV_TARGET_TRIPLE: target },
+    })
+    expect(result.status, result.stdout + result.stderr).toBe(0)
+    expect(readFileSync(commands, "utf8")).toContain(`"--target","${target}"`)
+    expect(
+      readFileSync(join(crate, "binaries", `codeg-mcp-${target}`), "utf8")
+    ).toBe("built:codeg-mcp")
   })
 
   it.each(["missing", "relative"])(
