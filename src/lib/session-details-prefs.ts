@@ -1,5 +1,5 @@
 // View preferences of the Session Details side panel: which of its sections
-// (plan, message navigator) are open, and how the message navigator lays out
+// (plan, ask conversations, check conversations, message navigator) are open, and how the message navigator lays out
 // a file's diff.
 //
 // Global, persisted in localStorage — one key per preference, so two windows
@@ -18,6 +18,8 @@ import type { DiffViewMode } from "@/lib/diff-view-mode-prefs"
 
 export type SessionDetailsSection =
   | "plan"
+  | "askConversations"
+  | "checkConversations"
   | "messageNav"
   | "subagents"
   | "live"

@@ -344,14 +344,17 @@ pub async fn resolve(
             .as_deref()
             .and_then(AssistantRunSnapshot::name_from_json)
     });
+    let bot_uid = child.as_ref().and_then(|c| c.bot_uid.clone());
     let assistant = match (assistant_id, snapshot_raw.as_deref()) {
         (Some(id), Some(raw)) => serde_json::from_str::<AssistantRunSnapshot>(raw)
             .ok()
             .map(|snapshot| DelegationAssistant {
                 id,
+                bot_uid: bot_uid.clone(),
                 name: snapshot.name,
                 agent_options: snapshot.agent_options,
                 instructions: snapshot.instructions,
+                avatar: snapshot.avatar,
             }),
         _ => None,
     };
@@ -372,6 +375,7 @@ pub async fn resolve(
         assistant_ref: assistant_id.map(|id| AssistantRef {
             id,
             name: assistant_name.clone().unwrap_or_default(),
+            bot_uid: bot_uid.clone(),
         }),
         assistant,
         task_preview: row.task_preview,

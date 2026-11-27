@@ -9,6 +9,7 @@ pub mod git;
 pub mod worktree_clone;
 
 pub use engine::{
-    build_task_engine, engine, run_task_engine, CleanupBlocked, EngineWorkTaskTools, TaskEngine,
+    build_task_engine, engine, run_task_engine, wait_boot_reconciled, CleanupBlocked,
+    EngineWorkTaskTools, TaskEngine,
 };
 pub(crate) use engine::worktree_kept;

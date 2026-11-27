@@ -108,6 +108,13 @@ pub enum AcpError {
         conversation_id: i32,
         folder_id: i32,
     },
+    /// An edited message's rewind (`crate::acp::rewind`) was declined: the
+    /// agent's session is exactly as it was and the prompt was not sent.
+    /// Carries the agent's `reason` (`busy`, `beforeCompaction`, …, or codeg's
+    /// `unavailable`); the frontend recognizes the stable Display text and
+    /// keeps the editor open.
+    #[error("edited message refused: {0}")]
+    RewindRefused(String),
 }
 
 impl AcpError {
@@ -165,6 +172,7 @@ impl AcpError {
             Self::AgentRuntimeOutdated(_) => Some("agent_runtime_outdated"),
             Self::SessionLoadFailed { .. } => Some("session_load_failed"),
             Self::ConversationMoved { .. } => Some("conversation_moved"),
+            Self::RewindRefused(_) => Some("rewind_refused"),
             Self::Protocol(_) => None,
         }
     }
